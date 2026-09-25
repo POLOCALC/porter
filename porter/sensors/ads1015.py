@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 
 # get the absolute path to this file's directory
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# get the absolute path to the binary in the bin folder relative to this file's directory
-binary_path = os.path.join(current_dir, "..", "..", "bin", "ads1015")
 
 class ADS1015:
 
@@ -34,7 +32,7 @@ class ADS1015:
 
     def read_continous_binary(self, shutdown_flag, datafile_name, status_board):
         # start the ads1015 process through the command line
-        cmd = f"{binary_path} --gain {self.gain} --rate {self.rate} --output {datafile_name} --i2c-bus {self.bus}"
+        cmd = f"ads1015 --gain {self.gain} --rate {self.rate} --output {datafile_name} --i2c-bus {self.bus}"
         if self.core is not None:
             cmd += f" --core {int(self.core)}"
         self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True, preexec_fn=os.setsid) 

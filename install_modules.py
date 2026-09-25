@@ -74,6 +74,13 @@ try:
 except:
     print("Error installing SourCore")
 
+# Alvium (Starspec module)
+print(" Installing Alvium (Starspec module)")
+try:
+    os.system(f"cd {current_dir}/modules/Alvium-Camera-Module && ./build.sh")
+except:
+    print("Error installing Alvium (Starspec module)")
+
 # ADS1015
 print(" Installing ADS1015")
 try:
@@ -95,6 +102,33 @@ try:
     os.system(f"cd {current_dir}/modules/LM76-Temperature-Sensor && ./build_for_pi.sh")
 except:
     print("Error installing LM76-Temperature-Sensor")
+
+# IMX5 (prebuilt binary): symlink it into ~/.local/bin so it runs from anywhere
+print(" Linking IMX5SensorModule")
+try:
+    binary = os.path.join(current_dir, "modules", "IMX-5-Sensor-Module", "bin", "IMX5SensorModule")
+    bin_dir = os.path.expanduser("~/.local/bin")
+    link = os.path.join(bin_dir, "IMX5SensorModule")
+
+    if not os.path.isfile(binary):
+        raise FileNotFoundError(binary)
+
+    os.makedirs(bin_dir, exist_ok=True)
+    # replace an existing link (equivalent of ln -sf)
+    if os.path.islink(link) or os.path.exists(link):
+        os.remove(link)
+    os.symlink(binary, link)
+    print(f"  Linked {link} -> {binary}")
+
+    if bin_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        bashrc = os.path.expanduser("~/.bashrc")
+        with open(bashrc, "a+") as f:
+            f.seek(0)
+            if "HOME/.local/bin" not in f.read():
+                f.write('\nexport PATH="$HOME/.local/bin:$PATH"\n')
+                print("  Added ~/.local/bin to PATH in ~/.bashrc (run: source ~/.bashrc)")
+except Exception as e:
+    print(f"Error linking IMX5SensorModule: {e}")
 
 print("Done installing packages.")
 

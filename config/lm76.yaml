@@ -1,0 +1,34 @@
+global:
+  name: porter
+  version: 4.0
+  description: Telemetry configuration for Porter
+  autostart_camera: True
+  autostart_poi_tracking: False
+
+sensors:
+  LM76_1:
+    name: LM76-Temp
+    sensor_core: 2
+    connection:
+      type: I2C
+      parameters:
+        bus: 1
+        address: 0x4B
+    sensor_info:
+      type: LM76
+      manufacturer: TexasInstruments
+    configuration:
+      interval: 10
+      tcrit: 15
+      thyst: 0
+      tlow: 10
+      thigh: 40
+      # Configuration register (power-up defaults shown)
+      int_mode: comparator        # comparator | event
+      tcrit_polarity: active_high  # active_low | active_high
+      int_polarity: active_low    # active_low | active_high
+      fault_queue: false          # true: 4 consecutive faults needed to trip
+
+status_writer:
+  enabled: True
+  update_rate: 1
