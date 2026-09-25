@@ -117,7 +117,7 @@ sensors:
       manufacturer: TexasInstruments
     configuration:
       interval: 10
-      tcrit: 15
+      tcrit: 35
       thyst: 0
       tlow: 10
       thigh: 40
@@ -126,6 +126,16 @@ sensors:
       tcrit_polarity: active_high  # active_low | active_high
       int_polarity: active_low    # active_low | active_high
       fault_queue: false          # true: 4 consecutive faults needed to trip
+
+source:
+  name: VALON-5019
+  port: /dev/ttyAMA3
+  baudrate: 115200
+  freq: 144
+  power: -6.5
+  mod_amp: 15
+  mod_freq: 37
+  mult_factor: 12
 
 camera:
   name: Alvium
@@ -138,27 +148,27 @@ camera:
   verbosity: False
 
 
-pointing_controller:
-  name: lager
-  gimbal:
-    name: Gremsy T7
-    simulator: False
-    connection:
-      type: serial
-      protocol: mavlink
-      port: /dev/ttyAMA3
-      baudrate: 115200
-      timeout: 3
-    telemetry:
-      heartbeat_frequency: 1  # Hz
-      frequency: 50  # Hz
+#pointing_controller:
+#  name: lager
+#  gimbal:
+#    name: Gremsy T7
+#    simulator: False
+#    connection:
+#      type: serial
+#      protocol: mavlink
+#      port: /dev/null
+#      baudrate: 115200
+#      timeout: 3
+#    telemetry:
+#      heartbeat_frequency: 1  # Hz
+#      frequency: 50  # Hz
 
-  poi:
-    name: POI
-    latitude: 50.9601079
-    longitude: -1.8971433
-    altitude: 139
-    max_distance: 1000.0  # meters
+#  poi:
+#    name: POI
+#    latitude: 50.9601079
+#    longitude: -1.8971433
+#    altitude: 139
+#    max_distance: 1000.0  # meters
 
 status_writer:
   enabled: True
