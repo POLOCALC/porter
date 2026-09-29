@@ -1,190 +1,283 @@
 # PORTER
 
-PORTER is the main flight/control software for the **POLOCALC** drone-based payload project. It runs on the payload's onboard computer (currently a Raspberry Pi 5, `RPi5_dev` branch — porter version `4.0`) and is responsible for:
+PORTER is the flight/control software for the **POLOCALC** drone-based payload. It runs on the payload's onboard computer (a Raspberry Pi 5, `RPi5_dev` branch, porter version `4.0`) and:
 
-- reading out the payload's sensors (GPS, IMU/inertial, ADC, temperature) and writing their raw data to disk,
-- driving the science camera (Vimba/Alvium industrial camera, or a Sony camera via the `sour_core` module),
-- controlling a Valon RF synthesizer used as a signal source,
-- driving a stabilized gimbal (via the `lager` module) for autonomous point-of-interest (POI) tracking, using either the payload's own GNSS fix or a drone's DRTK position,
-- exposing a lightweight command/telemetry link to the ground over an XBee radio, and
-- monitoring battery power (bus voltage/current/temperature) via an INA228 power monitor.
+- reads out the payload sensors (GPS, IMX5 IMU/INS, ADC, legacy inertial sensors, temperature) and writes their raw data to disk,
+- drives the science camera (Alvium industrial camera through `pyalvium`, the compiled `alvium` binary, or a Sony camera through `sour_core`),
+- configures a Valon RF synthesizer used as a signal source,
+- drives a stabilized gimbal (through the `lager` module) for autonomous point-of-interest (POI) tracking,
+- keeps a command and telemetry link with the ground station over an XBee radio.
 
-The same `control.py` entry point, driven by a YAML configuration file, is reused across the different phases of the project (bench testing, integration, flight) simply by swapping the configuration.
+The same entry point, `control.py`, is used for bench tests, integration and flight: only the YAML configuration file changes.
 
-## Repository Structure
+## How it fits together
+
+Two processes run on the Pi, each as its own systemd service:
+
+```
+telemd.service  (always running, owns the XBee radio)
+└── telemetry/telemd.py
+      │  sudo systemctl start/stop porter@<config>
+      ▼
+porter@<config>.service  (started on command from the ground)
+└── control.py -c config/<config>.yml
+      ├── sensor threads ──► sensor binaries (ads1015, inertial, IMX5SensorModule, LM76SensorModule, alvium)
+      ├── camera / gimbal threads
+      ├── StatusWriter ──► /tmp/porter_status.json ──► read by telemd, sent to the ground as TEL
+      └── CommandServer ◄── /tmp/porter_cmd.sock ◄── camera/gimbal commands relayed by telemd
+```
+
+- **telemd** starts at boot and never depends on `control.py`: the radio link, status and shell access keep working while porter is stopped, crashes or restarts.
+- **porter** (`control.py`) runs in its own systemd unit, so restarting telemd never stops data taking, and stopping porter always stops every sensor binary it started.
+- **Ground station:** `telemetry/remote_host.py` runs on the ground laptop, shows the telemetry and sends commands.
+
+## Repository structure
 
 ```
 porter/
-├── control.py              # main flight-software entry point (see Usage)
-├── parameters.py            # global constants (paths, timeouts, logging format, signals)
-├── exceptions.py             # ServiceExitError / FlagSetError used for clean shutdown
+├── control.py              # flight-software entry point (see "Running porter")
+├── parameters.py           # constants: paths, timeouts, logging format, signals
+├── exceptions.py           # ServiceExitError / FlagSetError used for clean shutdown
+├── install_modules.py      # installer: venv, Python packages, sensor binaries, systemd units
 ├── config/
-│   └── default.yml           # sensor/camera/gimbal configuration consumed by control.py
+│   ├── default.yml         # configuration used by default (and overwritten by `setconfig`)
+│   └── lm76.yaml           # example configuration with the LM76 temperature sensor enabled
 ├── porter/
-│   ├── threads.py            # threading.Thread subclasses: Sensors, cameras, PointingController, StatusWriter
-│   ├── valon.py               # serial driver for the Valon RF synthesizer
-│   └── sensors/               # Python wrappers around each sensor (see Sensors supported)
-├── telemetry/
-│   ├── telemd.py              # XBee ground-link daemon (systemd service)
-│   ├── command_server.py       # Unix-socket command server used by control.py to expose live commands
-│   ├── remote_host.py          # curses ground-station TUI client (runs on the ground laptop)
-│   ├── StatusBoard.py          # thread-safe sensor/camera heartbeat tracker
-│   ├── Xbee.py                 # low-level XBee device wrapper (digi-xbee)
-│   ├── alvium_capture.py        # standalone helper: capture a single Alvium frame (used by telemd's camera.capture command)
-│   └── default.yml              # currently byte-for-byte identical to config/default.yml
-├── power_monitor/
-│   ├── powerd.py                # INA228 battery-monitoring daemon (systemd service)
-│   └── ina228.py                 # INA228 driver (adafruit-circuitpython-ina228)
-├── decoders/                   # offline, standalone scripts to decode/plot the binary data recorded by control.py
-│   ├── ads1x15.py, ads1x15_LB.py, ads1x15_TS.py, ads1x15_starspec.py
-│   ├── inertial.py
-│   ├── kernel.py
-│   └── ubx.py
-├── startup/
-│   ├── telemd.service, powerd.service   # systemd unit files (see Deployment)
-│   ├── i2c-config.service                 # oneshot systemd unit running i2c_startup_config.sh at boot
-│   └── i2c_startup_config.sh                # sets the CPU frequency governor to "performance" on cores 0-3
-├── bin/                        # pre-built ARM64 (aarch64) binaries invoked by the sensor/camera Python wrappers
-│   ├── ads1015, inertial, IMX5SensorModule, LM76SensorModule, alvium
-├── test/                       # older/experimental scripts (test.py, test_gps.py)
-├── modules/                    # git submodules (build/vendor code — see below); not covered in depth here
-├── install_modules.py          # installs Python deps + submodules + builds the bin/ binaries + installs systemd services
-├── setup_gps.py, startup_nmea.py, startup_script.sh   # standalone GPS bring-up helpers (see Usage)
-├── version_history.txt         # plain-text changelog, V2.0 → current V4.0
-└── LICENSE                     # MIT
+│   ├── threads.py          # thread classes: Sensors, cameras, PointingController, StatusWriter
+│   ├── process_utils.py    # start/stop of sensor binaries (process groups, registry, clean kill)
+│   ├── valon.py            # serial driver for the Valon RF synthesizer
+│   └── sensors/            # Python wrappers, one per sensor type (see "Sensors")
+├── telemetry/              # radio daemon, ground station, radio protocol (see telemetry/README.md)
+├── services/               # systemd units and boot scripts (see services/README.md)
+├── power_monitor/          # draft INA228 power daemon, NOT implemented (see power_monitor/README.md)
+├── decoders/               # offline scripts to decode/plot recorded data
+├── modules/                # git submodules (sensor binaries, camera, gimbal code)
+├── test/                   # manual hardware test scripts
+├── setup_gps.py, startup_nmea.py, startup_script.sh   # old GPS helpers, not used (see "Legacy scripts")
+├── version_history.txt     # changelog
+└── LICENSE                 # MIT
 ```
 
-## Requirements / Dependencies
+## Requirements
 
-- **Hardware**: Raspberry Pi 5 (current target; `RPi5_dev` branch) with I2C/UART/USB-connected sensors, an XBee radio for the ground link, and (optionally) a Valon synthesizer, Gremsy gimbal, and Alvium/Sony camera.
-- **Python** 3, with packages including `pyyaml`, `pyserial`, `pyubx2`/`pynmeagps`, `digi-xbee`, `adafruit-circuitpython-ina228`, `adafruit-circuitpython-mcp4725`, `pyusb`, plus the project's own submodules (`vmbpy`, `pyalvium`, `lager`, `sour_core`) — all installed by `install_modules.py`.
-- **Compiled sensor binaries** in `bin/` — pre-built `aarch64` ELF executables (the wrapper classes in `porter/sensors/` shell out to these via `subprocess`). They are built from the `ADS1015-ADC-Module`, `Inertial-Sensors-Module`, `LM76-Temperature-Sensor`, `IMX-5-Sensor-Module`, and `Alvium-Camera-Module` submodules.
-- A dedicated Python virtual environment is expected at `/home/polocalc/porter_venv` (referenced by `telemd.py` and the `startup/*.service` files) and the payload's home directory is assumed to be `/home/polocalc` (`parameters.home_directory`).
+- **Hardware:** Raspberry Pi 5 with the sensors on I2C/UART/USB, an XBee radio on USB (`/dev/ttyUSB0`), and optionally a Valon synthesizer, a Gremsy gimbal and an Alvium or Sony camera.
+- **User and paths:** the software assumes user `polocalc`, home `/home/polocalc` (`parameters.home_directory`), the repository at **`/home/polocalc/flight/porter`**, and the Python virtual environment at **`/home/polocalc/porter_venv`**. The systemd units hard-code these paths.
+- **Permissions:** `polocalc` needs passwordless `sudo` (telemd runs `sudo systemctl`, `sudo reboot`, `sudo shutdown`) and read/write access to the serial and I2C devices (on Raspberry Pi OS, membership of the `dialout` and `i2c` groups).
+- **Build tools:** Rust (`cargo`) for the ADS1015, Inertial and LM76 binaries, and CMake/g++ for the Alvium binary.
+- **Time sync:** `chrony` (telemd reports its status in the telemetry).
 
 ## Installation
 
-1. Clone the repository together with its submodules (`modules/IMX-5-Sensor-Module`, `Alvium-Camera-Module`, `Alvium-Camera-Module-Python`, `Inertial-Sensors-Module`, `LM76-Temperature-Sensor`, `ADS1015-ADC-Module`, `lager`, `sour_core` — see `.gitmodules`), e.g. `git clone --recurse-submodules ...`.
-2. Run `python3 install_modules.py` from the repo root. It:
-   - `pip install`s `vmbpy`, `pyalvium` (editable, from `modules/Alvium-Camera-Module-Python`), `digi-xbee==1.5.0`, `adafruit-circuitpython-ina228`, `pyubx2`, `adafruit-circuitpython-mcp4725`, `pyusb`, `pyyaml`,
-   - installs `lager` and `sour_core` in editable mode from `modules/`,
-   - builds the Rust-based `ADS1015-ADC-Module`, `Inertial-Sensors-Module`, and `LM76-Temperature-Sensor` submodules via each one's `build_for_pi.sh` (their build output is expected to land in `bin/`),
-   - copies `startup/telemd.service` and `startup/powerd.service` into `/etc/systemd/system/`, reloads systemd, and enables + starts both services.
-3. The `Alvium-Camera-Module` and `IMX-5-Sensor-Module` binaries (`bin/alvium`, `bin/IMX5SensorModule`) are not built by `install_modules.py` in the current script and must be built separately from their own submodule directories.
+1. **Clone with submodules** into the deployment path:
+   ```sh
+   git clone --recurse-submodules https://github.com/POLOCALC/porter /home/polocalc/flight/porter
+   ```
+   Some submodules use SSH URLs (see `.gitmodules`), so the Pi needs a GitHub SSH key.
+2. **Run the installer** from the repository root, as `polocalc` (not with `sudo`; it calls `sudo` itself where needed):
+   ```sh
+   python3 install_modules.py
+   ```
+   It:
+   - creates the venv at `/home/polocalc/porter_venv` if it doesn't exist,
+   - installs the Python packages into the venv: `numpy`, `scipy`, `opencv-python-headless`, `vmbpy` (wheel in `modules/`), `pyalvium`, `lager` and `sour_core` (editable, from `modules/`), `digi-xbee`, `pyubx2`, `pyyaml`, `pyusb`, `adafruit-circuitpython-ina228`, `adafruit-circuitpython-mcp4725`,
+   - builds the ADS1015, Inertial and LM76 binaries (`build_for_pi.sh` in each submodule, which also links them into `~/.local/bin`) and the Alvium binary (`build.sh` in Alvium-Camera-Module, which does not link it),
+   - links the prebuilt `modules/IMX-5-Sensor-Module/bin/IMX5SensorModule` into `~/.local/bin`,
+   - adds `~/.local/bin` to `PATH` in `~/.bashrc` if needed,
+   - copies `services/telemd.service` and `services/porter@.service` to `/etc/systemd/system/`, reloads systemd, enables telemd and restarts it.
 
-Per project convention, `modules/` submodules are developed and fixed in their own upstream repositories — this README does not document their internals beyond the one-line summaries below.
+   If any step fails, the installer lists the failed steps, skips the systemd part and exits with code 1. Fix the problem and run it again: every step is safe to repeat.
+3. **Optional:** install the CPU-governor unit by hand (see [services/README.md](services/README.md)).
+4. **Check:** `systemctl status telemd` should be `active (running)`, and the ground station should start receiving telemetry.
+
+The sensor binaries are called by name (`ads1015`, `inertial`, `IMX5SensorModule`, `LM76SensorModule`, `alvium`), so they must be on `PATH`. `porter@.service` starts `control.py` through `bash --login`, which loads `~/.profile` and with it `~/.local/bin` and the Vimba/GenICam variables. `build.sh` in Alvium-Camera-Module does not link the `alvium` binary; link it by hand if you use the `Alvium_Starspec` camera.
+
+### Submodules
+
+`modules/` contains git submodules, each developed in its own repository. Fix them there, not inside `porter`.
 
 | Submodule | Purpose |
 |---|---|
-| `ADS1015-ADC-Module` | Rust implementation for configuring/reading the ADS1015 ADC for data logging. |
-| `Alvium-Camera-Module` | C/C++ implementation for configuring/handling the Alvium camera for data logging (compiled to `bin/alvium`). |
-| `Alvium-Camera-Module-Python` | Python module (`pyalvium`) controlling the Alvium camera via `vmbpy`, with parallelized frame writing to NVMe. |
-| `IMX-5-Sensor-Module` | C++ project using the Inertial Sense SDK to read the IMX-5 IMU/INS sensor. |
-| `Inertial-Sensors-Module` | Rust implementation for the legacy inertial sensors (IMU, magnetometer, barometer). |
-| `LM76-Temperature-Sensor` | Rust driver for the TI LM76 I2C temperature sensor. |
-| `lager` | "Live Attitude and Gimbal Error Resolver" — Python controller coordinating a drone (DJI M600) and a Gremsy T7 gimbal for autonomous POI tracking. |
-| `sour_core` | Shared core code (e.g. Sony camera control) used by both `porter` and the separate `SOUR` GUI project. |
+| `ADS1015-ADC-Module` | Rust program that configures and logs the ADS1015 ADC. |
+| `Inertial-Sensors-Module` | Rust program for the legacy inertial sensors (IMU, magnetometer, barometer). |
+| `LM76-Temperature-Sensor` | Rust program for the TI LM76 I2C temperature sensor. |
+| `IMX-5-Sensor-Module` | C++ program (Inertial Sense SDK) for the IMX-5 IMU/INS; ships a prebuilt binary in `bin/`. |
+| `Alvium-Camera-Module` | C/C++ program for the Alvium camera (`alvium` binary). |
+| `Alvium-Camera-Module-Python` | Python module `pyalvium`: Alvium control through `vmbpy`, with parallel frame writing. |
+| `lager` | "Live Attitude and Gimbal Error Resolver": drone and Gremsy T7 gimbal control for POI tracking. |
+| `sour_core` | Shared code (e.g. Sony camera control) used by porter and the SOUR GUI project. |
+
+## Running porter
+
+### From the ground (normal operation)
+
+In the ground station, `start` runs porter with `config/default.yml`. `start <name>` runs it with `config/<name>.yml`, for example `start test_configs/starspec`. `stop` stops it cleanly. See [telemetry/README.md](telemetry/README.md) for all commands.
+
+### On the Pi, through systemd
+
+The instance name after `@` selects the configuration file, relative to `config/` and without `.yml`:
+
+```sh
+sudo systemctl start porter@default                  # control.py -c config/default.yml
+sudo systemctl start porter@test_configs-starspec    # control.py -c config/test_configs/starspec.yml
+sudo systemctl stop 'porter@*'
+journalctl -u 'porter@*' -f
+```
+
+In an instance name, `-` stands for `/`. To use a config whose file name contains a real `-`, get the unit name from `systemd-escape --template=porter@.service <name>`.
+
+Only one porter instance should run at a time. telemd refuses `start` while any `porter@` unit is starting, running or stopping.
+
+### By hand (development)
+
+```sh
+/home/polocalc/porter_venv/bin/python3 control.py [-c config/default.yml]
+```
+
+`-c` accepts a path relative to the repository root or an absolute path. Stop with Ctrl+C.
+
+### What `control.py` does
+
+1. **Creates the run folder** `/home/polocalc/data/NNN_YYYYMMDD_HHMMSS/`. `NNN` is the highest existing run number + 1, starting at `001`, so deleting old runs never reuses a number. The folder is linked as `/home/polocalc/data/current`.
+2. **Saves a copy of the configuration** in the run folder and logs to `flight.log` there.
+3. **Starts, in order:**
+   1. the StatusWriter (1 Hz, `/tmp/porter_status.json`),
+   2. one thread per configured sensor,
+   3. the GNSS source for the gimbal (the first `GPS*` sensor),
+   4. the Valon synthesizer (if a `source` block is configured),
+   5. the camera,
+   6. the pointing controller,
+   7. the CommandServer (`/tmp/porter_cmd.sock`).
+4. **Runs until SIGINT/SIGTERM,** or until a fatal error.
+
+**Failure handling:**
+- **A sensor that fails** to start or stops sending data is marked `dead` in the telemetry, with the reason. The other sensors keep running.
+- **Any other error at startup** logs the traceback and shuts everything down with exit code 1. This includes a Valon that is configured but missing or not answering: a configured source is required.
+
+**Shutdown:**
+- It sets the shutdown flag, waits for all threads within one overall deadline (`SHUTDOWN_TIMEOUT` = 12 s), then stops any sensor binary still running (SIGTERM, then SIGKILL).
+- A second signal during shutdown is logged and ignored, so the cleanup always finishes.
+- The whole stop fits within the unit's `TimeoutStopSec=20`. After that, systemd kills anything left in the unit.
+
+### Data layout
+
+```
+/home/polocalc/data/
+├── current -> 007_20260928_120000/
+└── 007_20260928_120000/
+    ├── flight.log                            # porter log
+    ├── default.yml                           # copy of the configuration used
+    ├── sensors_data/
+    │   ├── <sensor>_<timestamp>.bin          # data file (or folder, for Inertial) passed to each binary
+    │   ├── <sensor>_<timestamp>_stdout.log   # stdout/stderr of that sensor's binary
+    │   └── ...                               # binary-specific files (IMX5 *_imu.csv/_ins.csv/_inl2.csv, LM76 .csv, ...)
+    └── camera_data/
+```
+
+`<sensor>` is the `name` from the configuration, and `<timestamp>` is the run's start time. When a sensor stops unexpectedly, its `_stdout.log` usually says why.
 
 ## Configuration
 
-`control.py` loads a single YAML file (default `config/default.yml`, overridable with `-c/--config_file`). Top-level keys, based on the current `config/default.yml`:
+`control.py` reads one YAML file. The top-level keys are:
 
-- **`global`**: `name`, `version`, `description`, plus autostart flags `autostart_camera` and `autostart_poi_tracking` (both read by `control.py` to decide whether to start the camera/POI-tracking threads immediately or wait for a remote command).
-- **`sensors`**: a mapping of arbitrary sensor keys (e.g. `GPS_1`, `ADC_1`, `IMX5_1`, `DAC_1`, `INERTIAL_1`) each with `name`, optional `sensor_core` (CPU core pinning passed to the compiled binaries), `connection` (`type`: `serial` or `I2C`, plus its parameters), `sensor_info` (`type`/`manufacturer`, used by `porter/sensors/sensors_handler.py` to pick the right driver class), and a driver-specific `configuration` block. The current default config enables a UBlox ZED-F9P GPS, an ADS1015 ADC, an IMX5-Sensors IMU/INS, an MCP4725 DAC, and a generic "Inertial" sensor (legacy IMU/magnetometer/barometer, manufacturer "Varios").
-- **`camera`**: `name` (`Alvium`, `Alvium_Starspec`, or `Sony` — dispatched in `porter/threads.py`), plus camera-specific settings (`exposure`, `gain`, `format`, `max_framerate`, `writing_threads`, `verbosity`, ROI, etc.).
-- **`pointing_controller`**: `name: lager`, a `gimbal` block (name, serial connection, mavlink protocol, telemetry rates) and a `poi` block (target latitude/longitude/altitude and `max_distance`) consumed by the `lager` module.
-- **`status_writer`**: `enabled`/`update_rate` keys are present in the file, though the current `control.py` always starts the `StatusWriter` thread (rate comes from `parameters.STATUS_WRITER_UPDATE_RATE`, not this block).
-- **`power_monitor`**: present but commented out in the current `config/default.yml` — power monitoring instead runs as the fully independent `powerd.py` daemon (see below), not as a `control.py`-managed sensor.
+- **`global`**: `name`, `version`, `description`, and the flags `autostart_camera` (start the camera at startup, or wait for `camera.start`) and `autostart_poi_tracking`.
+- **`sensors`**: one entry per sensor, with any key name (e.g. `GPS_1`, `ADC_1`). Each has:
+  - `name`, used in file names and in the telemetry,
+  - an optional `sensor_core`, the CPU core the binary is pinned to,
+  - `connection`, with `type` (`serial` or `I2C`) and `parameters` (port/baud rate or bus/address),
+  - `sensor_info`, whose `type` selects the driver, plus the manufacturer,
+  - a driver-specific `configuration` block.
 
-`telemetry/default.yml` currently has byte-identical content to `config/default.yml`.
+  A key starting with `GPS` is also used as the GNSS source for POI tracking.
+- **`source`**: the Valon synthesizer: `port`, `baudrate`, `freq` (MHz, before `mult_factor`), `power` (dBm), `mod_amp` (dB) and `mod_freq` (Hz; 0 disables AM). If present, the Valon must answer, or porter aborts.
+- **`camera`**: `name` (`Alvium`, `Alvium_Starspec` or `Sony`) plus camera settings (exposure, gain, format, frame rate, writing threads, ROI, ...).
+- **`pointing_controller`**: `name: lager`, with a `gimbal` block (serial connection, mavlink settings) and a `poi` block (target latitude, longitude, altitude, `max_distance`).
+- **`status_writer`**: present in the file but not read. The rate comes from `parameters.STATUS_WRITER_UPDATE_RATE`.
 
-`parameters.py` holds constants not meant to change per run: logging format/level, retry `ATTEMPTS`, signals to catch (`SIGINT`, `SIGTERM`), `THREAD_JOIN_TIMEOUT`, `SENSOR_INIT_TIMEOUT`, `STATUS_WRITER_UPDATE_RATE`, and path/naming conventions for the data directory (`home_directory = "/home/polocalc"`, `data_folder_name = "data"`, `sensors_folder_name`, `camera_folder_name`, `current_symlink_name = "current"`, `logfile_name = "flight.log"`), plus `INCREMENTAL_FILE_PREFIX` which, when `True`, prefixes each run's data folder with an incrementing 3-digit counter (e.g. `001_20260910_101500`).
+**Currently in `config/default.yml`:**
+- **enabled:** ZED-F9P GPS, ADS1015 ADC, IMX5, MCP4725 DAC, legacy Inertial sensors, Alvium camera;
+- **commented out:** LM76, Valon source, pointing controller.
 
-## Usage
+**Changing the configuration remotely:** `setconfig <file>` from the ground station replaces `config/default.yml`. It checks the upload is valid YAML first and keeps the previous file as `config/default.yml.bak`. The new file is used at the next `start`.
 
-### Main flight software — `control.py`
+`parameters.py` holds values that don't change per run:
+- logging format and level,
+- `ATTEMPTS` (retry count, e.g. Valon ID),
+- the signals caught (`SIGINT`, `SIGTERM`),
+- `SHUTDOWN_TIMEOUT`, `SENSOR_INIT_TIMEOUT`, `STATUS_WRITER_UPDATE_RATE`,
+- the data-folder names and `INCREMENTAL_FILE_PREFIX` (the `NNN_` run numbers).
 
-```
-python3 control.py [-c/--config_file CONFIG_FILE]
-```
+## Sensors
 
-- `-c`/`--config_file` — path to the YAML config, relative to the repo root (default: `config/default.yml`).
-- On startup it creates a timestamped (optionally incrementally-numbered) run directory under `<home_directory>/data/`, symlinks it as `<home_directory>/data/current`, saves a copy of the config file used, and logs to `<run_dir>/flight.log` and stdout.
-- It then, in order: starts a `StatusWriter` thread (writes `/tmp/porter_status.json` at 1 Hz for `telemd.py` to pick up), starts a `CommandServer` (Unix socket `/tmp/porter_cmd.sock`) so remote commands can reach running threads, starts one `Sensors` thread per configured sensor, locates a GNSS source from the first `GPS*`-keyed sensor (if any), configures the Valon synthesizer if a `source` block is present, starts the configured camera thread, and starts the `PointingController` thread (registering `gimbal.goto`, `gimbal.mode`, `gimbal.starttrack`, `gimbal.stoptrack` commands with the command server).
-- It runs until `SIGINT`/`SIGTERM` (or an internal `ServiceExitError`/`FlagSetError`) is raised, then joins all owned threads (with a timeout) before exiting.
-- `control.py` is normally started/stopped remotely via `telemd.py`'s `start`/`stop` commands (which invoke it inside `/home/polocalc/porter_venv`), not run directly in production.
+The driver is selected in `porter/sensors/sensors_handler.py` from `sensor_info.type`, ignoring case:
 
-### Telemetry / ground-link daemon — `telemetry/telemd.py`
-
-Runs continuously as a systemd service (`telemd.service`) and owns the XBee radio. It reads `/tmp/porter_status.json` (written by `control.py`'s `StatusWriter`) and `/tmp/power_cmd.json` (expected from `powerd.py`) and periodically sends a `TEL:<json>` packet to the ground station. It accepts commands from the ground over XBee, including:
-
-`ping`, `reboot`, `shutdown`, `start`, `stop`, `getlog`, `setconfig <path>`, `camera.start`, `camera.capture [-e <exposure>] [-g <gain>]`, `gimbal.goto <yaw> <pitch> <roll>`, `gimbal.mode <mode>`, `gimbal.starttrack`, `gimbal.stoptrack`, `$<shell command>` (background job with `jobs`/`canceljob <id>` management), and unrecognized commands get an `ERR:` reply.
-
-Camera/gimbal commands are relayed to the running `control.py` process over the `CommandServer` Unix socket (`/tmp/porter_cmd.sock`); `start`/`stop` launch or signal the `control.py` subprocess directly.
-
-### Ground station — `telemetry/remote_host.py`
-
-A `curses`-based TUI meant to run on the ground laptop:
-
-```
-python3 remote_host.py [--port /dev/ttyUSB0] [--baudrate 38400] [--debug]
-```
-
-It shows live telemetry (disk usage, porter/chrony/power-controller status, per-sensor health from the `StatusBoard`) in the upper panel and a command prompt (same command set as `telemd.py` above) in the lower panel.
-
-### Power daemon — `power_monitor/powerd.py`
-
-Runs continuously as a systemd service (`powerd.service`), independent of `control.py`. A single thread polls the INA228 power monitor once per second and atomically writes bus voltage/current/power/temperature/energy plus derived over/under-voltage and over-current alarm flags to `/tmp/powerd_status.json`. Note: `telemd.py` currently reads power status from a differently-named path (`/tmp/power_cmd.json`, `POWER_CONTROLLER_STATUS_PATH`) than the one `powerd.py` writes to (`/tmp/powerd_status.json`).
-
-### Standalone GPS helpers
-
-`setup_gps.py`, `startup_nmea.py`, and `startup_script.sh` are separate from `control.py`: `startup_nmea.py` uses `pyubx2` to (re)configure the ZED-F9P's UART1 (UBX) / UART2 (NMEA) output protocols and message set directly over serial; `startup_script.sh` runs it three times with short delays (its hardcoded path `/home/polocalc/Documents/porter/startup_nmea.py` differs from the `/home/polocalc/flight/porter` path used by the systemd services, suggesting it may predate the current deployment layout). `setup_gps.py` is an older, GPS-focused variant of the main control loop that uses an earlier `Sensors`/`Handler` calling convention than the current `porter/threads.py`/`porter/sensors/sensors_handler.py`.
-
-### Offline decoders — `decoders/`
-
-Standalone, argparse-driven scripts (not imported by `control.py`) to parse and plot the raw `.bin` files written by the sensor threads: `ads1x15.py`/`ads1x15_LB.py`/`ads1x15_TS.py`/`ads1x15_starspec.py` for ADC data variants, `inertial.py` for the legacy inertial sensors, `kernel.py` for the (currently unused) Inertial Labs inclinometer, and `ubx.py` for GPS/UBX data.
-
-## Sensors Supported
-
-Dispatch happens in `porter/sensors/sensors_handler.py` based on each sensor's `sensor_info.type` (case-insensitive):
-
-| `sensor_info.type` | Driver | Notes |
+| `type` | Driver | How it works |
 |---|---|---|
-| `gps` | `porter/sensors/ubx.py` (`UBX`) | Pure-Python driver using `pyubx2`/`pynmeagps` over serial; used for the UBlox ZED-F9P in `config/default.yml`. |
-| `adc` | `porter/sensors/ads1015.py` (`ADS1015`) | Shells out to the compiled `bin/ads1015` binary (I2C, configurable gain/data rate). |
-| `inertial` | `porter/sensors/inertial.py` (`Inertial`) | Shells out to `bin/inertial` (I2C); IMU output is currently hardcoded disabled (`--no-imu`) per a comment in that file. This is the "legacy" IMU/magnetometer/barometer sensor, distinct from KERNEL below. |
-| `dac` | `porter/sensors/mcp4725.py` (`MCP4725`) | Direct `adafruit_mcp4725` I2C driver; used to set a fixed output voltage rather than log data. |
-| `inclinometer` (manufacturer `inertial_labs`) | `porter/sensors/KERNEL.py` (`KernelInertial`) | Pure-Python driver for the Inertial Labs KERNEL inclinometer. **Not referenced in the current `config/default.yml`/`telemetry/default.yml`** — supported in code but not currently used on this payload. |
-| `imx5` | `porter/sensors/IMX5SensorModule.py` (`IMX5SensorModule`) | Shells out to `bin/IMX5SensorModule` (serial/USB); configurable IMU/INS data rates. |
-| `lm76` | `porter/sensors/LM76SensorModule.py` (`LM76SensorModule`) | Shells out to `bin/LM76SensorModule` (I2C); optional `tcrit`/`thyst`/`tlow`/`thigh` alarm thresholds. |
+| `GPS` | `ubx.py` (`UBX`) | Python, `pyubx2` over serial. Detects the receiver's baud rate, switches it to the configured one, configures the UBX/NMEA messages, logs raw UBX to the `.bin` file (flushed every second), and reports fix and position in the telemetry. It stops after 10 s without data. |
+| `ADC` | `ads1015.py` (`ADS1015`) | Runs the `ads1015` binary (I2C, configurable gain and data rate). |
+| `Inertial` | `inertial.py` (`Inertial`) | Runs the `inertial` binary (I2C). The IMU output is disabled (`--no-imu`, hard-coded), so only the magnetometer and barometer record data. |
+| `IMX5` | `IMX5SensorModule.py` | Runs the `IMX5SensorModule` binary (USB serial), with configurable IMU and INS rates. |
+| `LM76` | `LM76SensorModule.py` | Runs the `LM76SensorModule` binary (I2C). `address` is required; optional alarm thresholds. |
+| `DAC` | `mcp4725.py` (`MCP4725`) | Python, sets a fixed output voltage; it doesn't log data. |
+| `inclinometer` | `KERNEL.py` | Inertial Labs KERNEL inclinometer. Supported in code, not used on this payload. |
 
-All of the "shells out to a binary" drivers run their subprocess in a loop, verify the output file/directory keeps getting fresh data after a startup grace period, and call `status_board.beat(name)` each iteration so `StatusBoard`/`telemd.py`/`remote_host.py` can report per-sensor health (`ok`/`stale`/`dead`). `porter/sensors/FakeSensor.py` provides a `FakeConnection` for local development without hardware (`Handler(..., local=True)`).
+**Wrappers that run a binary:**
+- **Start:** the binary runs in its own process group, its output goes to `<sensor>_<timestamp>_stdout.log`, and it is registered in `porter/process_utils.py`, so shutdown can always stop it.
+- **Health check:** every second the wrapper checks that the binary is alive and, after a 10 s grace period, that its output file was updated in the last 5 s. If not, the sensor is stopped and reported as `dead`.
+- **Stop:** SIGTERM, then SIGKILL after 3 s.
 
-## Camera & Gimbal
+Sensor health is tracked by `telemetry/StatusBoard.py`:
+- **`ok`:** a heartbeat within the last 3 s.
+- **`stale`:** 3–10 s since the last heartbeat.
+- **`dead`:** more than 10 s, or the sensor never started. A sensor that failed to start or crashed also carries an `error` field with the reason.
 
-- **Camera** (`camera` config block, dispatched in `porter/threads.py`): `Alvium` (Python `pyalvium` module, multithreaded frame writing, started/stopped through the command server and optionally autostarted), `Alvium_Starspec` (shells out to the compiled `bin/alvium` binary), or `Sony` (via the `sour_core.sony` module, supports `video`/`photo` modes with configurable ISO/shutter speed/focus distance).
-- **Pointing controller / gimbal** (`pointing_controller` config block): only `lager` is currently supported. `porter/threads.py`'s `PointingController` thread connects to the Gremsy T7 gimbal (over mavlink/serial), starts telemetry, and can autonomously track a configured point of interest (`poi`) using a GNSS source obtained from the first configured `GPS*` sensor. `gimbal.goto`, `gimbal.mode`, `gimbal.starttrack`, `gimbal.stoptrack` are exposed as remote commands.
-- **Valon RF synthesizer** (`porter/valon.py`, `source` config block): serial driver to set frequency, power, and AM modulation on a Valon synthesizer, used as a signal source rather than a sensor.
+## Camera, gimbal and source
 
-## Deployment (Raspberry Pi 5)
+- **Camera** (`camera` block, see `porter/threads.py`):
+  - **`Alvium`** (Python, `pyalvium`) is started at startup or by `camera.start`.
+  - **`Alvium_Starspec`** runs the `alvium` binary.
+  - **`Sony`** uses `sour_core.sony`, in video or photo mode.
 
-Two long-running systemd services, installed by `install_modules.py` from `startup/`:
+  telemd's `camera.capture` takes one frame with `telemetry/alvium_capture.py` and sends it to the ground.
+- **Gimbal** (`pointing_controller` block): only `lager` is supported. It controls a Gremsy T7 over mavlink and can track the configured POI using the GNSS source. `gimbal.goto`, `gimbal.mode`, `gimbal.starttrack` and `gimbal.stoptrack` are available from the ground.
+- **Valon synthesizer** (`source` block, `porter/valon.py`): at startup porter checks that the Valon answers its ID request, then sets the frequency, power and AM modulation. A configured Valon that is missing or silent stops the run.
 
-- **`telemd.service`** — runs `telemetry/telemd.py` in `/home/polocalc/porter_venv`, `WorkingDirectory=/home/polocalc/flight/porter`, restarts on failure, waits 5 s at start for the XBee USB device to enumerate.
-- **`powerd.service`** — runs `power_monitor/powerd.py` the same way, restarts on failure, waits 5 s at start.
+## Decoders
 
-`control.py` itself is **not** a systemd service — it is started/stopped on demand by `telemd.py`'s `start`/`stop` commands (or manually).
+`decoders/` contains standalone scripts, not used by `control.py`, to read and plot recorded data:
+- `ubx.py`: GPS/UBX,
+- `inertial.py`: legacy inertial sensors,
+- `kernel.py`: KERNEL inclinometer,
+- `ads1x15*.py`: ADC variants.
 
-A third unit, **`startup/i2c-config.service`**, is a one-shot service (`Before=zkbootrtc.service`) that runs `startup/i2c_startup_config.sh` at boot; despite the name, that script sets the CPU frequency scaling governor to `performance` on cores 0-3 rather than configuring I2C directly.
+The `ads1x15*.py` decoders expect the old binary record format (`struct` records). The current `ads1015` binary writes text lines (`<timestamp> <value>`), so read new ADC files as text instead (e.g. `numpy.loadtxt`).
 
-## Version / Changelog
+## Legacy scripts
 
-See `version_history.txt` for the full history. The current version is:
+`setup_gps.py`, `startup_nmea.py` and `startup_script.sh` predate the current design and are not used:
+- `setup_gps.py` uses an old calling convention and does not run.
+- `startup_nmea.py` assumes 38400 baud.
+- `startup_script.sh` points to an old path.
 
-> **V4.0 — Raspberry Pi 5 version of porter**
-> - Alvium camera is handled by a Python module with multithreaded memory writing
-> - XBee modules are used for line-of-sight telemetry/control
-> - Integrated `lager` module for gimbal control and drone live telemetry access
-> - Point-of-interest autonomous tracking using the payload's GNSS or a drone's DRTK
+The GPS is now configured by `porter/sensors/ubx.py` at every start. `test/` contains manual hardware test scripts (ADC timing, GPS), not automated tests.
+
+## Troubleshooting
+
+| Symptom | Where to look |
+|---|---|
+| No telemetry on the ground | `journalctl -u telemd -f` on the Pi. telemd exits with an error, and systemd restarts it, if the XBee stops responding or one of its threads dies. |
+| `start` fails or porter stops right away | `journalctl -u 'porter@*' -e`, then `flight.log` in `/home/polocalc/data/current/` |
+| A sensor shows `dead` | its `_stdout.log` in `current/sensors_data/`, and the `error` field in the telemetry |
+| Porter won't start: "already running" | `systemctl list-units 'porter@*'`, then `sudo systemctl stop 'porter@*'` |
+
+## Version
+
+See `version_history.txt`. Current version:
+
+> **V4.0: Raspberry Pi 5 version of porter**
+> - Alvium camera handled by a Python module with multithreaded writing
+> - XBee modules for line-of-sight telemetry and control
+> - `lager` module for gimbal control and drone telemetry
+> - Autonomous POI tracking using the payload's GNSS or a drone's DRTK
 
 ## License
 

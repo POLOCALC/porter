@@ -104,38 +104,38 @@ sensors:
     configuration: 
       data_rate: 150
 
-  # LM76_1:
-  #   name: LM76-Temp
-  #   sensor_core: 2
-  #   connection:
-  #     type: I2C
-  #     parameters:
-  #       bus: 1
-  #       address: 0x4B
-  #   sensor_info:
-  #     type: LM76
-  #     manufacturer: TexasInstruments
-  #   configuration:
-  #     interval: 10
-  #     tcrit: 35
-  #     thyst: 0
-  #     tlow: 10
-  #     thigh: 40
-  #     # Configuration register (power-up defaults shown)
-  #     int_mode: comparator        # comparator | event
-  #     tcrit_polarity: active_high  # active_low | active_high
-  #     int_polarity: active_low    # active_low | active_high
-  #     fault_queue: false          # true: 4 consecutive faults needed to trip
+   LM76_1:
+     name: LM76-Temp
+     sensor_core: 2
+     connection:
+       type: I2C
+       parameters:
+         bus: 1
+         address: 0x4B
+     sensor_info:
+       type: LM76
+       manufacturer: TexasInstruments
+     configuration:
+       interval: 10
+       tcrit: 35
+       thyst: 0
+       tlow: 10
+       thigh: 40
+       # Configuration register (power-up defaults shown)
+       int_mode: comparator        # comparator | event
+       tcrit_polarity: active_high  # active_low | active_high
+       int_polarity: active_low    # active_low | active_high
+       fault_queue: false          # true: 4 consecutive faults needed to trip
 
-#source:
-#  name: VALON-5019
-#  port: /dev/ttyAMA3
-  # baudrate: 115200
-  # freq: 144
-  # power: -6.5
-  # mod_amp: 15
-  # mod_freq: 0.2
-  # mult_factor: 12
+source:
+  name: VALON-5019
+  port: /dev/ttyAMA3
+   baudrate: 115200
+   freq: 144
+   power: -6.5
+   mod_amp: 15
+   mod_freq: 0.2
+   mult_factor: 12
 
 camera:
   name: Alvium

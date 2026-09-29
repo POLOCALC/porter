@@ -1,0 +1,31 @@
+[Unit]
+Description=Porter flight software (config: config/%I.yml)
+Documentation=https://github.com/POLOCALC/porter
+After=network.target chronyd.service
+
+[Service]
+Type=simple
+User=polocalc
+WorkingDirectory=/home/polocalc/flight/porter
+
+# The instance name selects the config file relative to config/:
+#   systemctl start porter@default                   -> config/default.yml
+#   systemctl start porter@test_configs-starspec     -> config/test_configs/starspec.yml
+# (build names with: systemd-escape --template=porter@.service test_configs/starspec)
+# bash --login sources .profile, needed for the Vimba/GenICam environment variables.
+# exec replaces bash with python, so python is the main PID and receives the stop signal.
+ExecStart=/bin/bash --login -c 'exec /home/polocalc/porter_venv/bin/python3 control.py -c "config/%I.yml"'
+
+# Stop: SIGINT to control.py only (clean shutdown through its signal handler),
+# then SIGKILL to anything left in the cgroup, including sensor binaries started with setsid.
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+# Started on demand by telemd, not restarted automatically: each start creates a new run folder.
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=porter
+
+# Not enabled at boot: telemd starts and stops it on command.

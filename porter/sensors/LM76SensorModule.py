@@ -4,12 +4,14 @@ import os
 import signal
 import time
 
+from porter.process_utils import start_process, stop_process
+
 logger = logging.getLogger(__name__)
 
 # get the absolute path to this file's directory
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Allowed values for the configuration register settings (passed to the binary)
+# allowed values for the configuration register settings (passed to the binary)
 INT_MODES = ("comparator", "event")
 POLARITIES = ("active-low", "active-high")
 
@@ -30,12 +32,16 @@ class LM76SensorModule:
         self.core = sensor_core
         self.bus = bus
         self.address = address
+        if address is None:
+            raise ValueError(f"{name}: 'address' missing in config")
+        self.address = int(str(address), 0)    # accepts 75, "75", "0x4B", 0x4B
+
         self.interval = 10  # Default to 10 seconds
         self.tcrit = None
         self.thyst = None
         self.tlow = None
         self.thigh = None
-        # Configuration register settings (None leaves the register bit untouched)
+        # configuration register settings (None leaves the register bit untouched)
         self.int_mode = None
         self.tcrit_polarity = None
         self.int_polarity = None
@@ -46,10 +52,10 @@ class LM76SensorModule:
         logger.info(f"Connected to LM76 sensor {self.name}")
 
     def read_continous_binary(self, shutdown_flag, datafile_name, status_board):
-        # Start the LM76SensorModule process through the command line.
+        # start the LM76SensorModule process through the command line.
         cmd = f"LM76SensorModule --bus {self.bus} --address {hex(self.address)} --interval {self.interval} --outputdir {datafile_name}"
         
-        # Add threshold configurations if set
+        # add threshold configurations if set
         if self.tcrit is not None:
             cmd += f" --tcrit {self.tcrit}"
         if self.thyst is not None:
@@ -59,7 +65,7 @@ class LM76SensorModule:
         if self.thigh is not None:
             cmd += f" --thigh {self.thigh}"
 
-        # Add configuration register settings if set
+        # add configuration register settings if set
         if self.int_mode is not None:
             cmd += f" --int-mode {self.int_mode}"
         if self.tcrit_polarity is not None:
@@ -72,36 +78,35 @@ class LM76SensorModule:
         if self.core is not None:
             cmd += f" --core {int(self.core)}"
 
-        logger.info(f"Running command: {cmd}")
-        # print(f"Running command: {cmd}")
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=True,
-            preexec_fn=os.setsid,
-        )
+        # send the binary output to a log file next to the data file instead of an
+        # unread pipe, so it can't block on a full pipe and its errors are kept
+        log_path = os.path.splitext(datafile_name)[0] + "_stdout.log"
+        with open(log_path, "ab") as log:
+            self.process = start_process(cmd, stdout=log, stderr=subprocess.STDOUT)
         launch_time = time.monotonic()
-        # The binary writes <name>.csv next to the given .bin path (see main.rs)
+        
+        # the binary writes <name>.csv next to the given .bin path (see main.rs)
         csv_file = os.path.splitext(datafile_name)[0] + ".csv"
-        # Allow one missed sample plus scheduling jitter before declaring the sensor dead
+        # allow one missed sample plus scheduling jitter before declaring the sensor dead
         max_silence = self.interval * 2 + 5.0
-        # Loop until told to close
 
+        # loop until told to close
         while not shutdown_flag.is_set():
             shutdown_flag.wait(1)
-            # Check if the process exited on its own
+            # check if the process exited on its own
             if self.process is not None and self.process.poll() is not None:
                 logger.error(f"{self.name} process exited unexpectedly (exit code {self.process.returncode})")
                 break
-            # After startup grace period, verify data is still flowing to the CSV file
+            # after startup grace period, verify data is still flowing to the CSV file
             if time.monotonic() - launch_time > 10.0:
                 try:
                     if time.time() - os.path.getmtime(csv_file) > max_silence:
                         logger.error(f"{self.name}: no new data written for >{max_silence:.0f}s, sensor may be disconnected")
                         break
                 except OSError:
-                    pass
+                    logger.error(f"{self.name}: no output file after startup grace period, sensor not writing")
+                    break
+
             status_board.beat(self.name)
             
         self.close()
@@ -154,14 +159,7 @@ class LM76SensorModule:
         return value
 
     def close(self):
-
-        # Kill the process
-        if self.process is not None:
-            try:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass  # process already gone
-            self.process = None
-
+        # stop the process: SIGTERM, wait up to 3 s, then SIGKILL
+        stop_process(self.process, self.name)
+        self.process = None
         logger.info(f"Closed sensor {self.name}")
-

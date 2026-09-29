@@ -15,13 +15,28 @@ class StatusBoard:
             self._heartbeats[name] = time.monotonic()
             self._meta[name] = meta or {}   # e.g. bytes_written=1234, fix="3D"
 
+    def register(self, name: str) -> None:
+        """Make a sensor visible (as dead) before its first beat."""
+        with self._lock:
+            self._heartbeats.setdefault(name, None)
+            self._meta.setdefault(name, {})
+
+    def mark_failed(self, name: str, reason: str) -> None:
+        with self._lock:
+            self._heartbeats[name] = None
+            self._meta[name] = {"error": reason[:60]}
+
     def get_health(self, stale_after: float = 3.0, dead_after: float = 10.0) -> dict:
         """Return a copy of current health, safe to read from any thread."""
         now = time.monotonic()
         result = {}
         with self._lock:
             for name, t in self._heartbeats.items():
+                if t is None:
+                    result[name] = {"state": "dead", **self._meta.get(name, {})}
+                    continue
                 age = now - t
+
                 if age < stale_after:
                     state = "ok"
                 elif age < dead_after:

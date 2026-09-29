@@ -1,8 +1,10 @@
 import logging
-import subprocess
 import os
+import subprocess
 import signal
 import time
+
+from porter.process_utils import start_process, stop_process
 
 ADS1015_VALUE_GAIN = {
     1: 4.096,
@@ -35,24 +37,31 @@ class ADS1015:
         cmd = f"ads1015 --gain {self.gain} --rate {self.rate} --output {datafile_name} --i2c-bus {self.bus}"
         if self.core is not None:
             cmd += f" --core {int(self.core)}"
-        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True, preexec_fn=os.setsid) 
-        launch_time = time.monotonic()
-        # Loop until told to close
 
+        # send the binary output to a log file next to the data file instead of an
+        # unread pipe, so it can't block on a full pipe and its errors are kept
+        log_path = os.path.splitext(datafile_name)[0] + "_stdout.log"
+        with open(log_path, "ab") as log:
+            self.process = start_process(cmd, stdout=log, stderr=subprocess.STDOUT)
+        launch_time = time.monotonic()
+
+        # loop until told to close
         while not shutdown_flag.is_set():
             shutdown_flag.wait(1)
-            # Check if the process exited on its own
+            # check if the process exited on its own
             if self.process is not None and self.process.poll() is not None:
                 logger.error(f"{self.name} process exited unexpectedly (exit code {self.process.returncode})")
                 break
-            # After startup grace period, verify data is still flowing to the output file
+            # after startup grace period, verify data is still flowing to the output file
             if time.monotonic() - launch_time > 10.0:
                 try:
                     if time.time() - os.path.getmtime(datafile_name) > 5.0:
                         logger.error(f"{self.name}: no new data written for >5s, sensor may be disconnected")
                         break
                 except OSError:
-                    pass
+                    logger.error(f"{self.name}: no output file after startup grace period, sensor not writing")
+                    break
+
             status_board.beat(self.name)
 
         self.close()
@@ -67,12 +76,7 @@ class ADS1015:
         logger.info(f"Current Gain Setting {self.gain}: {self.gain_value}")
 
     def close(self):
-        # kill the process
-        if self.process is not None:
-            try:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass  # process already gone
-            self.process = None
-
+        # stop the process: SIGTERM, wait up to 3 s, then SIGKILL
+        stop_process(self.process, self.name)
+        self.process = None
         logger.info(f"Closed sensor {self.name}")

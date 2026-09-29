@@ -90,15 +90,15 @@ class UBX:
         transaction = 0
         keys = []
 
-        # Parsing yaml config file keys and converting them to configuration keys that the ZED-F9P can interpret.
+        # parsing yaml config file keys and converting them to configuration keys that the ZED-F9P can interpret.
         for i in config.keys():
             if i.lower() == "rate":
-                # Add rate configuration
+                # add rate configuration
                 rate = int(1 / config["RATE"]["value"] * 1000)
                 keys.append(("CFG_RATE_MEAS", rate))
 
             elif i.lower() == "ubx_msg":
-                # Add output port for UBX messages.
+                # add output port for UBX messages.
                 output_port = config["UBX_MSG"]["output_port"]
 
                 if output_port[0].lower() == "uart":
@@ -107,7 +107,7 @@ class UBX:
                     port_string = output_port
 
                 string = "CFG_MSGOUT_UBX_"
-                # Enable options for logging different UBX messages.
+                # enable options for logging different UBX messages.
                 for j in config["UBX_MSG"].keys():
                     if j.lower() == "output_port":
                         pass
@@ -118,7 +118,7 @@ class UBX:
 
             elif i.lower() == "nmea_msg":
 
-                # Add output port for NMEA messages.
+                # add output port for NMEA messages.
                 output_port = config["NMEA_MSG"]["output_port"]
 
                 if output_port[0].lower() == "uart":
@@ -128,7 +128,7 @@ class UBX:
 
                 string = "CFG_MSGOUT_NMEA_ID"
 
-                # Enable options for logging different NMEA messages.
+                # enable options for logging different NMEA messages.
                 for j in config["NMEA_MSG"].keys():
                     if j.lower() == "output_port":
                         pass
@@ -138,7 +138,7 @@ class UBX:
 
                             keys.append((msg, 1))
 
-            # Configuring output port configurations for the ZED-F9P
+            # configuring output port configurations for the ZED-F9P
             elif i[:4].lower() == "nmea" or i[:3].lower() == "ubx":
 
                 if i[:4].lower() == "nmea":
@@ -158,42 +158,14 @@ class UBX:
                 if isinstance(config[i], list):
                     keys.append((config[i][0], config[i][1]))
 
-        # Setting up and serialize the configuration parameters for the ZED-F9P
+        # setting up and serialize the configuration parameters for the ZED-F9P
         cfgs = ubx.UBXMessage.config_set(layers, transaction, keys)
         serial_cfgs = cfgs.serialize()
-
-        # msg_count = 0
-        # ack_count = 0
-
-        # if self.__new_baudrate:
-        # # Open a serial connection at default baudrate of ZED-F9P to ensure connectivity upon reboot.
-        # self.conn = serial.Serial(self.__port, 38400, timeout=1)
-        # if self.conn.is_open:
-        # logger.info(f"Connected to ublox sensor {self.name} @ {38400}")
-        # self.reader = ubx.UBXReader(self.conn, protfilter=2)
-
-        # self.conn.reset_input_buffer()
-        # self.conn.write(serial_cfgs)
-
-        # t0 = time.perf_counter()
-        # while time.perf_counter() - t0 <= 1.0:
-        # parsed = self.read(parsing=True)
-        # if parsed.identity == "ACK-ACK":
-        # logger.info(f"Output Configuration ACK {parsed.identity}")
-        # logger.info(f"Configuration {keys}")
-        # break
-        # else:
-        # logger.info(f"Output Configuration {parsed.identity}")
-
-        # logger.info(
-        # f"Output Configuration ACK {parsed.identity} {time.perf_counter() - t0}"
-        # )
-        # logger.info(f"Configuration {keys}")
 
         if self.__new_baudrate:
             # self.conn.reset_input_buffer()
 
-            # Set the ZED-F9P baudrate to the one specified in the config file.
+            # set the ZED-F9P baudrate to the one specified in the config file.
             msg_baud = ubx.UBXMessage.config_set(
                 1, 0, [("CFG_UART1_BAUDRATE", self.__brate)]
             )
@@ -247,6 +219,8 @@ class UBX:
             while time.perf_counter() - t0 <= 1.0:
                 logger.info(f"Bytes  === {self.conn.inWaiting()}")
                 parsed = self.read(parsing=True)
+                if parsed is None:
+                    continue
                 if parsed.identity == "ACK-ACK":
                     logger.info(f"Output Configuration {parsed.identity}")
                     break
@@ -256,55 +230,49 @@ class UBX:
             logger.info(f"Configuration {keys}")
 
     def read_continous_binary(self, shutdown_flag, datafile_name, status_board):
+        consecutive_timeouts = 0
+        last_flush = time.monotonic()
 
-        # capture loop start time for logging printouts.
-        loop_start = time.time()
-        t_prev = loop_start
+        with open(datafile_name, "ab") as datafile:   # also closes the file on any exit
+            while not shutdown_flag.is_set():
+                try:
+                    msg, parsed = self.read(parsing=None)
+                except Exception as e:
+                    logger.error(f"{self.name} read error, sensor may have disconnected: {e}")
+                    break
 
-        try:
-            datafile = open(datafile_name, "r+b")
-        except FileNotFoundError:
-            datafile = open(datafile_name, "x+b")
+                if msg is None:                        # serial timeout, no bytes
+                    consecutive_timeouts += 1
+                    if consecutive_timeouts >= 10:     # about 10 seconds of silence
+                        logger.error(f"{self.name}: no data for {consecutive_timeouts}s")
+                        break
+                    continue                           # don't beat: let the status show it
+                consecutive_timeouts = 0
 
-        # data_path = '/'.join(datafile_name.split('/')[:-1])
-        # timing_path = data_path + '/gps_timing.txt'
-        # logger.info(f'Timing path : {timing_path}')
-
-        while not shutdown_flag.is_set():
-            # read from the GPS and measure the amount of time taken.
-            try:
-                t_start = time.perf_counter_ns()
-                msg, parsed = self.read(parsing=None)
-                t_end = time.perf_counter_ns()
-            except Exception as e:
-                logger.error(f"{self.name} read error, sensor may have disconnected: {e}")
-                break
-
-            read_time = t_end - t_start
-            t = time.time()
-
-            # push the data to the queue
-            datafile.write(msg)
+                datafile.write(msg)
+                if time.monotonic() - last_flush > 1.0:
+                    datafile.flush()                   # at most about 1 second lost on a hard stop
+                    last_flush = time.monotonic()
             
-            # update fix status only when a NAV-STATUS message arrives;
-            # all other message types leave the last known status intact
-            if parsed is not None and parsed.identity == "NAV-STATUS":
-                self.metadata.update({"status": parsed.gpsFix, "status_ok": parsed.gpsFixOk})
+                # update fix status only when a NAV-STATUS message arrives;
+                # all other message types leave the last known status intact
+                if parsed is not None and parsed.identity == "NAV-STATUS":
+                    self.metadata.update({"status": parsed.gpsFix, "status_ok": parsed.gpsFixOk})
 
-            # add lat lon and alt to metadata if available
-            if parsed is not None and parsed.identity == "NAV-POSLLH":
-                self.metadata.update(
-                    {
-                        "latitude": parsed.lat,
-                        "longitude": parsed.lon,
-                        "altitude": parsed.height/1000.0,  # convert mm to m
-                    }
-                )
+                # add lat lon and alt to metadata if available
+                if parsed is not None and parsed.identity == "NAV-POSLLH":
+                    self.metadata.update(
+                        {
+                            "latitude": parsed.lat,
+                            "longitude": parsed.lon,
+                            "altitude": parsed.height/1000.0,  # convert mm to m
+                        }
+                    )
 
-            # update the status board
-            status_board.beat(self.name, self.metadata)
+                # update the status board
+                status_board.beat(self.name, self.metadata)
 
-        self.close()
+            self.close()
 
     def get_gnss_source(self):
         return self.metadata

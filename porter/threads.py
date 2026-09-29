@@ -8,6 +8,8 @@ import subprocess
 import signal
 import shutil
 
+from porter.process_utils import start_process, stop_process
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -66,8 +68,10 @@ class Sensors(threading.Thread):
 
         self.sensor_name = sensor_name
         self.status_board = status_board
+        self.status_board.register(self.sensor_name)
 
-        self.datafile_name = path + self.sensor_name + "_" + date + ".bin"
+
+        self.datafile_name = os.path.join(path, f"{self.sensor_name}_{date}.bin") if self.sensor_name else os.path.join(path, f"sensor_{date}.bin")
         self.shutdown_flag = flag
         self.handler = handler
         # set once _connection()/_configuration() have been attempted (success or failure),
@@ -75,23 +79,31 @@ class Sensors(threading.Thread):
         self.ready = threading.Event()
 
     def run(self):
-        # initialize the sensor here (not in __init__) so a connection/configuration
-        # failure only takes down this sensor's thread, not the whole process
         try:
             self.handler._connection()
             self.handler._configuration()
         except Exception as e:
             logger.error(f"Sensor {self.sensor_name} failed to initialize, skipping: {e}")
+            self.status_board.mark_failed(self.sensor_name, f"init failed: {e}")
             self.ready.set()
             return
         self.ready.set()
 
-        # block forever, getting data from the handler thread through the queue, until shutdown
         logger.info(f"Sensor {self.sensor_name} started")
-        self.handler.obj.read_continous_binary(self.shutdown_flag, self.datafile_name, self.status_board)
-
-        # can only get here if shutdown flag is set
+        try:
+            self.handler.obj.read_continous_binary(self.shutdown_flag, self.datafile_name, self.status_board)
+        except Exception as e:
+            logger.exception(f"Sensor {self.sensor_name} crashed")
+            self.status_board.mark_failed(self.sensor_name, f"crashed: {e}")
+        finally:
+            close = getattr(self.handler.obj, "close", None)
+            if close is not None:
+                try:
+                    close()          # safe to call twice
+                except Exception:
+                    logger.exception(f"Sensor {self.sensor_name}: close() failed")
         logger.info(f"Sensor {self.sensor_name} closed")
+
 
 class AlviumCameraStarspec(threading.Thread):
 
@@ -147,7 +159,9 @@ class AlviumCameraStarspec(threading.Thread):
             cmd += f" --output {self.output}"
         if self.core is not None:
             cmd += f" --core {int(self.core)}"
-        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True, preexec_fn=os.setsid)
+        log_path = (self.output.rstrip("/") if self.output else os.path.join(self.path, self.camera_name)) + "_stdout.log"
+        with open(log_path, "ab") as log:
+            self.process = start_process(cmd, stdout=log, stderr=subprocess.STDOUT)
         launch_time = time.monotonic()
 
         while not self.shutdown_flag.is_set():
@@ -168,25 +182,8 @@ class AlviumCameraStarspec(threading.Thread):
         self.close()
 
     def close(self):
-        if self.process is not None:
-            try:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
-                try:
-                    self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    logger.warning(f"Process did not terminate in time, sending SIGTERM.")
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-                    try:
-                        self.process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        logger.error(f"Process did not terminate after SIGTERM, sending SIGKILL.")
-                        os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-                        self.process.wait()
-            except ProcessLookupError:
-                pass
-            finally:
-                self.process = None
-
+        stop_process(self.process, self.name, first_signal=signal.SIGINT, grace=5)
+        self.process = None
         logger.info(f"Closed sensor {self.name}")
 
 class AlviumCamera(threading.Thread):
@@ -489,17 +486,7 @@ class StatusWriter(threading.Thread):
         while not self.shutdown_flag.is_set():
             self.shutdown_flag.wait(1.0 / self.update_rate)
 
-            root = "/"
-            total, used, free = shutil.disk_usage(root)
-            system = {
-                "time":    time.time(),
-                "hddusd":  round(used  / (1024 ** 3), 2),
-                "hddfree": round(free  / (1024 ** 3), 2),
-                "hddtot":  round(total / (1024 ** 3), 2),
-            }
-
             payload = {
-                "system": system,
                 "health": self.status_board.get_health(),
                 "meta":   self.status_board.get_metadata(),
             }

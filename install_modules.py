@@ -1,107 +1,46 @@
+import subprocess
 import os
+import sys
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
+failures = []
 
-print("Installing required modules in the folder ./modules...")
+def step(name, cmd):
+    print(f"Installing {name}...")
+    try:
+        subprocess.run(cmd, shell=True, check=True)
+    except subprocess.CalledProcessError as e:
+        failures.append(name)
+        print(f"   ERROR: {name} failed (exit {e.returncode})")
 
-# VmbPy
-print(" Installing VmbPy")
-try:
-    os.system(f"pip install {current_dir}/modules/vmbpy-1.2.1-py3-none-any.whl")
-except:
-    print("Error installing VmbPy")
+# use the environment PIP, if it does not exist, create it
+VENV = "/home/polocalc/porter_venv"
+PIP = f"{VENV}/bin/pip"
+if not os.path.exists(PIP):
+    print(f"Creating virtual environment for porter in {VENV}...")
+    subprocess.run(f"python3 -m venv {VENV}", shell=True, check=True)
 
-# Pyalvium
-print(" Installing Pyalvium")
-try:
-    os.system(f"pip install -e {current_dir}/modules/Alvium-Camera-Module-Python/.")
-except:
-    print("Error installing Pyalvium")
 
-# digi-Xbee
-print(" Installing digi-xbee")
-try:
-    os.system(f"pip install digi-xbee==1.5.0")
-except:
-    print("Error installing digi-xbee")
+print("Installing packages...")
 
-# ina228 
-print(" Installing ina228")
-try:
-    os.system(f"pip install adafruit-circuitpython-ina228")
-except:
-    print("Error installing ina228")
+step("numpy", f"{PIP} install numpy==2.2.4")
+step("scipy", f"{PIP} install scipy==1.15.3")
+step("opencv", f"{PIP} install opencv-python-headless==4.10.0.84")
+step("VmbPy", f"{PIP} install {current_dir}/modules/vmbpy-1.2.1-py3-none-any.whl")
+step("Pyalvium", f"{PIP} install -e {current_dir}/modules/Alvium-Camera-Module-Python/.")
+step("digi-xbee", f"{PIP} install digi-xbee==1.5.0")
+step("ina228", f"{PIP} install adafruit-circuitpython-ina228")
+step("pyubx2", f"{PIP} install pyubx2")
+step("mcp4725", f"{PIP} install adafruit-circuitpython-mcp4725")
+step("pyusb", f"{PIP} install pyusb")
+step("pyyaml", f"{PIP} install pyyaml")
+step("lager", f"{PIP} install -e {current_dir}/modules/lager/.")
+step("sourcore", f"{PIP} install -e {current_dir}/modules/sour_core/.")
+step("Alvium (Starspec)", f"cd {current_dir}/modules/Alvium-Camera-Module && ./build.sh")
+step("ADS1015", f"cd {current_dir}/modules/ADS1015-ADC-Module && ./build_for_pi.sh")
+step("Inertial-Sensors-Module", f"cd {current_dir}/modules/Inertial-Sensors-Module && ./build_for_pi.sh")
+step("LM76-Temperature-Sensor", f"cd {current_dir}/modules/LM76-Temperature-Sensor && ./build_for_pi.sh")
 
-# pyubx2
-print(" Installing pyubx2")
-try:
-    os.system(f"pip install pyubx2")
-except:
-    print("Error installing pyubx2")
-
-# adafruit-circuitpython-mcp4725
-print(" Installing adafruit-circuitpython-mcp4725")
-try:
-    os.system(f"pip install adafruit-circuitpython-mcp4725")
-except:
-    print("Error installing adafruit-circuitpython-mcp4725")
-
-# pyUSB
-print(" Installing pyusb")
-try:
-    os.system(f"pip install pyusb")
-except:
-    print("Error installing pyusb")
-
-# pyyaml
-print(" Installing pyyaml")
-try:
-    os.system(f"pip install pyyaml")
-except:
-    print("Error installing pyyaml")
-
-# lager
-print(" Installing lager")
-try:
-    os.system(f"pip install -e {current_dir}/modules/lager/.")
-except:
-    print("Error installing lager")
-
-# SourCore
-print(" Installing SourCore")
-try:
-    os.system(f"pip install -e {current_dir}/modules/sour_core/.")
-except:
-    print("Error installing SourCore")
-
-# Alvium (Starspec module)
-print(" Installing Alvium (Starspec module)")
-try:
-    os.system(f"cd {current_dir}/modules/Alvium-Camera-Module && ./build.sh")
-except:
-    print("Error installing Alvium (Starspec module)")
-
-# ADS1015
-print(" Installing ADS1015")
-try:
-    # cd to the build_for_pi.sh script to the current directory and run it
-    os.system(f"cd {current_dir}/modules/ADS1015-ADC-Module && ./build_for_pi.sh")
-except:
-    print("Error installing ADS1015")
-
-# Inertial sensor
-print(" Installing Inertial-Sensors-Module")
-try:
-    os.system(f"cd {current_dir}/modules/Inertial-Sensors-Module && ./build_for_pi.sh")
-except:
-    print("Error installing Inertial-Sensors-Module")
-
-# LM76
-print(" Installing LM76-Temperature-Sensor")
-try:
-    os.system(f"cd {current_dir}/modules/LM76-Temperature-Sensor && ./build_for_pi.sh")
-except:
-    print("Error installing LM76-Temperature-Sensor")
 
 # IMX5 (prebuilt binary): symlink it into ~/.local/bin so it runs from anywhere
 print(" Linking IMX5SensorModule")
@@ -128,23 +67,31 @@ try:
                 f.write('\nexport PATH="$HOME/.local/bin:$PATH"\n')
                 print("  Added ~/.local/bin to PATH in ~/.bashrc (run: source ~/.bashrc)")
 except Exception as e:
+    failures.append("IMX5 link")
     print(f"Error linking IMX5SensorModule: {e}")
 
+if failures:
+    print("\nThe following packages failed to install:")
+    for name in failures:
+        print(f"  - {name}")
+    sys.exit(1)
 print("Done installing packages.")
 
-print("Installing systemd services...")
-try:
-    os.system(f"sudo cp {current_dir}/startup/telemd.service /etc/systemd/system/")
-    os.system("sudo systemctl daemon-reload")
-    os.system("sudo systemctl enable telemd.service")
-    os.system("sudo systemctl start telemd.service")
-except:
-    print("Error installing systemd services")
 
-try:
-    os.system(f"sudo cp {current_dir}/startup/powerd.service /etc/systemd/system/")
-    os.system("sudo systemctl daemon-reload")
-    os.system("sudo systemctl enable powerd.service")
-    os.system("sudo systemctl start powerd.service")
-except:
-    print("Error installing systemd services")
+print("Installing systemd services...")
+
+step("copy unit", f"sudo cp {current_dir}/services/telemd.service /etc/systemd/system/")
+#step("copy unit", f"sudo cp {current_dir}/services/powerd.service /etc/systemd/system/")
+step("copy unit", f"sudo cp {current_dir}/services/porter@.service /etc/systemd/system/")
+step("daemon-reload", "sudo systemctl daemon-reload")
+
+step("enable telemd", "sudo systemctl enable telemd.service")
+step("restart telemd", "sudo systemctl restart telemd.service")
+
+#step("enable powerd", "sudo systemctl enable powerd.service")
+#step("restart powerd", "sudo systemctl restart powerd.service")
+
+if failures:
+    print(f"Failed steps: {', '.join(failures)}")
+    sys.exit(1)
+print("Install complete.")

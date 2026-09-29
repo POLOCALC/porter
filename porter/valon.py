@@ -17,8 +17,14 @@ class Valon:
         - port: serial port for connection
         - baud: baudrate for the serial connection
         """
+        self.conn = None
+        try:
+            self.conn = serial.Serial(port, baud, timeout=1)
+            self.conn.reset_input_buffer()
+            logger.info(f"Connected to Valon on {port} at {baud} baud")
+        except serial.SerialException as e:
+            raise RuntimeError(f"Valon not available on {port}: {e}")
 
-        self.conn = serial.Serial(port, baud, timeout=1)
 
     def send_receive(self, msg, receive=True):
         """
@@ -31,13 +37,10 @@ class Valon:
 
         if receive:
             time.sleep(0.1)
-
             resp_size = self.conn.inWaiting()
             resp = self.conn.read(resp_size)
-
             logger.info(resp)
-
-            return resp.decode().splitlines()
+            return resp.decode(errors="replace").splitlines()
 
         else:
             if self.conn.inWaiting() > 0:
@@ -47,23 +50,20 @@ class Valon:
         """
         Get id
         """
-
         msg = "id\r"
-
         id_raw = self.send_receive(msg)
-
+        if id_raw is None or len(id_raw) < 2:
+            logger.error("Failed to get ID from Valon")
+            return None
         return str(id_raw)
 
     def get_stat(self):
         """
         Get status (in order to see if there are firmware updates)
         """
-
         msg = "stat\r"
-
         stat_raw = self.send_receive(msg)
         stat_raw = stat_raw[1].split(",")
-
         return str(stat_raw[3])
 
     def set_freq(self, f):
@@ -72,7 +72,6 @@ class Valon:
         Parameters:
         - f: frequency in MHz
         """
-
         msg = "f " + str(f) + "\r"
         self.send_receive(msg, receive=True)
 
@@ -80,13 +79,9 @@ class Valon:
         """
         Get current frequency output of the Valon in MHz
         """
-
         msg = "f?\r"
-
         freq_raw = self.send_receive(msg)
-
         # freq_raw = freq_raw[1].split('//')
-
         # return float(freq_raw[1][4:-4])
         return freq_raw
 
@@ -104,12 +99,9 @@ class Valon:
         """
         Get current power output of the Valon in dBm
         """
-
         msg = "pwr?\r"
         pwr_raw = self.send_receive(msg)
-
         # pwr_raw = pwr_raw[1].split(';')
-
         # return float(pwr_raw[0][4:])
         return pwr_raw
 
@@ -121,10 +113,8 @@ class Valon:
         - amd_db: AM modulation in dB. the range is from 0 to 20.0 dB)
         - amd_f: AM modulation in Hz. the range is from 0.5 Hz and 10kHz
         """
-
         msg_db = "amd " + str(amd_db) + "\r"
         self.send_receive(msg_db, receive=True)
-
         msg_f = "amf " + str(amd_f) + "\r"
         self.send_receive(msg_f, receive=True)
 
@@ -134,15 +124,12 @@ class Valon:
         in hz
         """
         # time.sleep(5)
-
         msg_db = "amd?\r"
         amd_raw_db = self.send_receive(msg_db)
         # amd_raw_db = amd_raw_db[1]
-
         msg_f = "amf?\r"
         amd_raw_f = self.send_receive(msg_f)
         # amd_raw_f = amd_raw_f[1]
-
         # return float(amd_raw_db[4:-3]), float(amd_raw_f[3:-3])*1000
         return amd_raw_db, amd_raw_f
 
@@ -181,7 +168,7 @@ class Valon:
         msg_rate = "RATE " + str(rate) + "\r"
         self.send_receive(msg_rate, receive=False)
 
-        msg_rtime = "RTIME " + str(time) + "\r"
+        msg_rtime = "RTIME " + str(rtime) + "\r"
         self.send_receive(msg_rtime, receive=False)
 
         t = time.time()
@@ -196,6 +183,7 @@ class Valon:
                     msg_modecw = "MOD CW " + "\r"
                     self.send_receive(msg_modecw, receive=False)
                     break
+                time.sleep(0.1)
 
     def close_connection(self, valon_off=False):
         """

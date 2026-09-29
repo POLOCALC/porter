@@ -1,10 +1,20 @@
 # power_monitor
 
-**Not implemented yet.** This folder contains draft code for a battery power-monitoring daemon; it is not integrated into the flight software or deployed on the payload.
+**Not implemented yet.** This folder contains draft code for a battery power-monitoring daemon. It is not part of the flight software and must not be deployed.
 
-- **`powerd.py`** — draft standalone daemon intended to own an INA228 power monitor: poll bus voltage/current/power/temperature/energy once per second, check them against fixed over/under-voltage and over-current thresholds, and write the result to a JSON status file (`/tmp/powerd_status.json`) for other processes to read.
-- **`ina228.py`** — draft INA228 I2C driver used by `powerd.py`.
+- **`powerd.py`**: draft standalone daemon meant to own an INA228 power monitor. Once per second it would read bus voltage, current, power, temperature and energy, check them against over/under-voltage and over-current limits, and write the result to `/tmp/powerd_status.json`.
+- **`ina228.py`**: draft INA228 I2C driver used by `powerd.py`.
 
-There is a `powerd.service` unit under `startup/` for eventually running this as a systemd service, but until this module is finished, tested against real hardware, and wired into the rest of PORTER (e.g. `telemetry/telemd.py`, which currently expects a different status-file path than the one `powerd.py` writes), it should be treated as work in progress rather than part of the current flight software.
+## Current state
 
-See the repository root [README.md](../README.md) for the overall PORTER architecture.
+- **Not installed:** `install_modules.py` does not install or enable `services/powerd.service`. Don't enable that unit by hand: the daemon isn't finished, and with `Restart=on-failure` it would restart in a loop.
+- **Not read by telemd:** `POWER_CONTROLLER_ENABLED = False` in `telemetry/telemd.py`, so the telemetry has no power data. The ground station's "Power Controller" line shows `ERR` for this reason.
+
+## Before enabling it
+
+1. Finish `powerd.py` and test it against the real INA228.
+2. Make the status-file path match: telemd reads `POWER_CONTROLLER_STATUS_PATH = "/tmp/power_cmd.json"`, while `powerd.py` writes `/tmp/powerd_status.json`.
+3. Set `POWER_CONTROLLER_ENABLED = True` in `telemetry/telemd.py`.
+4. Add `powerd.service` to the systemd part of `install_modules.py`: copy the unit, reload, enable, restart.
+
+See the root [README.md](../README.md) for the overall architecture.

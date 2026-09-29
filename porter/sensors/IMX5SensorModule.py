@@ -4,6 +4,8 @@ import os
 import signal
 import time
 
+from porter.process_utils import start_process, stop_process
+
 logger = logging.getLogger(__name__)
 
 # get the absolute path to this file's directory
@@ -28,12 +30,14 @@ class IMX5SensorModule:
         if self.core is not None:
             cmd += f" --core {int(self.core)}"
 
-        logger.info(f"Running command: {cmd}")
-        # print(f"Running command: {cmd}")
-        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, preexec_fn=os.setsid)
+        # send the binary output to a log file next to the data file instead of an
+        # unread pipe, so it can't block on a full pipe and its errors are kept
+        log_path = os.path.splitext(datafile_name)[0] + "_stdout.log"
+        with open(log_path, "ab") as log:
+            self.process = start_process(cmd, stdout=log, stderr=subprocess.STDOUT)
         launch_time = time.monotonic()
+    
         # loop until told to close
-
         while not shutdown_flag.is_set():
             shutdown_flag.wait(1)
             # check if the process exited on its own
@@ -43,15 +47,15 @@ class IMX5SensorModule:
             # after startup grace period, verify data is still flowing to the output directory
             if time.monotonic() - launch_time > 10.0:
                 try:
-                    # get list of files in the output directory that start with "IMX5"
-                    files = [f for f in os.listdir(os.path.dirname(datafile_name)) if f.startswith("IMX5")]
-                    # check if any file has been modified in the last 5 seconds
-                    if not any(time.time() - os.path.getmtime(os.path.join(os.path.dirname(datafile_name), f)) < 5.0 for f in files):
+                    imu_file = os.path.splitext(datafile_name)[0] + "_imu.csv"
+                    if time.time() - os.path.getmtime(imu_file) > 5.0:
                         logger.error(f"{self.name}: no new data written for >5s, sensor may be disconnected")
                         break
+
                 except OSError:
-                    logger.error(f"Failed to read sensor output directory: {datafile_name}")
-                    pass
+                    logger.error(f"{self.name}: no output file after startup grace period, sensor not writing")
+                    break
+
             status_board.beat(self.name)
 
         self.close()
@@ -65,10 +69,7 @@ class IMX5SensorModule:
         logger.info(f"Current IMX5 INS Data Rate: {self.ins_rate} Hz")
 
     def close(self):
-
-        # Kill the process
-        if self.process is not None:
-            os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-            self.process = None
-
+        # stop the process: SIGTERM, wait up to 3 s, then SIGKILL
+        stop_process(self.process, self.name)
+        self.process = None
         logger.info(f"Closed sensor {self.name}")

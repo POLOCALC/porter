@@ -3,6 +3,7 @@ from digi.xbee.devices import RemoteXBeeDevice
 from digi.xbee.serial import XBeeSerialPort
 from digi.xbee.models.address import XBee64BitAddress
 from digi.xbee.exception import TimeoutException, TransmitException
+from digi.xbee.models.options import TransmitOptions
 
 IDs = {
     "OBI": "0013A20041C2BB3E",
@@ -57,7 +58,7 @@ class Xbee:
     def close(self):
         self.device.close()
     
-    def send_msg(self, msg):
+    def send_msg(self, msg, ack=True):
         if isinstance(msg, list):
             msg = ''.join(msg)
         if isinstance(msg, str):
@@ -65,8 +66,10 @@ class Xbee:
         # append EOM before chunking so the last chunk always carries it
         msg = msg + END_OF_MESSAGE_BYTE
         chunks = [msg[i:i+MAX_PACKET_SIZE] for i in range(0, len(msg), MAX_PACKET_SIZE)]
+        opts = TransmitOptions.NONE.value if ack else TransmitOptions.DISABLE_ACK.value
         for chunk in chunks:
-            self.device.send_data(self.remote_device, chunk)
+            self.device.send_data(self.remote_device, chunk, transmit_options=opts)
+
 
     def send_msg_broadcast(self, msg):
         if isinstance(msg, list):

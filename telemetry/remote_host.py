@@ -2,7 +2,7 @@
 """
 remote_host.py  -  ground-station TUI.
 
-Run on the laptop.  Shows live telemetry from porter (via TEL packets) in the
+Run on the laptop.  Shows live telemetry from porter (via telemetry packets) in the
 upper panel, and a command prompt in the lower panel.
 
 Usage:
@@ -74,10 +74,12 @@ _shutdown  = threading.Event()
 _outbound: "queue.Queue[str]" = queue.Queue()
 
 _state_lock = threading.Lock()
-_tel        = {}          # latest parsed TEL payload
+_tel        = {}          # latest parsed telemetry payload
 _rssi       = None        # downlink RSSI (dBm)
 _log        = []          # recent message log
 LOG_MAX     = 40
+_last_tel = {"sid": None, "seq": -1, "rx": None}   # newest telemetry shown; rx = local monotonic time
+
 
 
 def _push_log(msg: str) -> None:
@@ -91,6 +93,8 @@ def _push_log(msg: str) -> None:
 def _io_thread(antenna: Xbee) -> None:
     global _rssi
     rx_buf = b""
+    last_frame_time = 0.0
+
 
     while not _shutdown.is_set():
 
@@ -116,7 +120,13 @@ def _io_thread(antenna: Xbee) -> None:
             frame = None
 
         if frame is not None:
+            now = time.monotonic()
+            if rx_buf and now - last_frame_time > 1.0:
+                _push_log("[discarding incomplete message after RX gap]")
+                rx_buf = b""
+            last_frame_time = now
             rx_buf += frame.data
+
             if rx_buf.endswith(END_OF_MESSAGE_BYTE):
                 _on_message(rx_buf[:-1], antenna)
                 rx_buf = b""
@@ -132,6 +142,12 @@ def _on_message(raw: bytes, antenna: Xbee) -> None:
     if text.startswith("TEL:"):
         try:
             payload = json.loads(text[4:])
+            sid, seq = payload.get("sid"), payload.get("seq", 0)
+            with _state_lock:
+                if sid == _last_tel["sid"] and seq <= _last_tel["seq"]:
+                    return                      # older than what is already shown
+                _last_tel.update(sid=sid, seq=seq, rx=time.monotonic())
+
             # read downlink RSSI from the XBee hardware register
             try:
                 db = antenna.device.get_parameter("DB")
@@ -143,7 +159,7 @@ def _on_message(raw: bytes, antenna: Xbee) -> None:
                 _tel.clear()
                 _tel.update(payload)
         except json.JSONDecodeError as e:
-            _push_log(f"[TEL parse error] {e}")
+            _push_log(f"[Telemetry parse error] {e}")
 
     elif text.startswith("LOGDATA:"):
         try:
@@ -226,6 +242,7 @@ def _draw(stdscr, input_buf: str) -> None:
         tel  = dict(_tel)
         rssi = _rssi
         log  = list(_log)
+        tel_rx = _last_tel["rx"]
 
     row = 0
 
@@ -240,16 +257,38 @@ def _draw(stdscr, input_buf: str) -> None:
         free  = system.get("hddfree", 0)
         total = system.get("hddtot", 1)
         pct   = free / total * 100 if total else 0
-        row = _safe_addstr(stdscr, row, 2,
-            f"Time: {tstr}   Disk: {free:.1f}/{total:.1f} GiB ({pct:.0f}%)", C_NORMAL())
+        cpu_t = system.get("cputemp")
+        line  = f"Time: {tstr}   Disk: {free:.1f}/{total:.1f} GiB ({pct:.0f}%)   CPU: "
+        row = _safe_addstr(stdscr, row, 2, line, C_NORMAL())
+        row -= 1  # stay on same row
+        if cpu_t is None:
+            temp_str, temp_attr = "-", C_NORMAL()
+        else:
+            temp_str  = f"{cpu_t:.1f} °C"
+            temp_attr = C_OK() if cpu_t < 70 else (C_STALE() if cpu_t < 80 else C_DEAD())
+        _safe_addstr(stdscr, row, 2 + len(line), temp_str, temp_attr)
+        row += 1
+
     rssi_str = f"{rssi} dBm" if rssi is not None else "-"
     porter   = tel.get("porter", "-")
-    porter_attr = C_OK() if porter == "running" else (C_STALE() if porter == "stopped" else C_DEAD())
+    porter_attr = C_OK() if porter.startswith("running") else (C_STALE() if porter == "stopped" else C_DEAD())
     row = _safe_addstr(stdscr, row, 2, f"Downlink RSSI: {rssi_str}   Porter: ", C_NORMAL())
     row -= 1  # stay on same row
     x_porter = 2 + len(f"Downlink RSSI: {rssi_str}   Porter: ")
     _safe_addstr(stdscr, row, x_porter, porter.upper(), porter_attr)
     row += 1
+
+    if tel_rx is None:
+        age_str, age_attr = "no data", C_DEAD()
+    else:
+        age = time.monotonic() - tel_rx
+        age_str = f"{age:.0f} s"
+        age_attr = C_OK() if age < 3 else (C_STALE() if age < 10 else C_DEAD())
+    row = _safe_addstr(stdscr, row, 2, "Telemetry age: ", C_NORMAL())
+    row -= 1
+    _safe_addstr(stdscr, row, 2 + len("Telemetry age: "), age_str, age_attr)
+    row += 1
+
 
     # chrony status
     chrony = tel.get("chrony", {})
@@ -261,7 +300,7 @@ def _draw(stdscr, input_buf: str) -> None:
     x_chrony = 2 + len(f"Chrony: ")
     _safe_addstr(stdscr, row, x_chrony, "OK" if chrony_state else "ERR", chrony_attr)
     if chrony_ref:
-        row = _safe_addstr(stdscr, row, x_chrony + 4, f"Reference: {chrony_ref}", C_NORMAL())
+        row = _safe_addstr(stdscr, row, x_chrony + 4, f"Time reference: {chrony_ref}", C_NORMAL())
     row += 1
 
     # power controller status
@@ -385,6 +424,15 @@ def _tui(stdscr, antenna: Xbee) -> None:
                         _push_log(f"ERR: file not found: {path}")
                     except Exception as e:
                         _push_log(f"ERR: {e}")
+            elif cmd.startswith("canceljob"):
+                parts = original_input.split(None, 1)
+                if len(parts) < 2:
+                    _push_log("Usage: canceljob <jid>")
+                else:
+                    jid = parts[1].strip()
+                    _outbound.put(f"canceljob {jid}")
+            elif cmd == "start" or cmd.startswith("start "):
+                _outbound.put(original_input.strip())
             elif cmd in COMMANDS:
                 _outbound.put(cmd)
             elif cmd:

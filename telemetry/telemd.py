@@ -39,6 +39,8 @@ import tempfile
 import time
 import uuid
 import re
+import yaml
+import shutil
 
 # global state for jobs that are running in the background (e.g. shell commands)
 _jobs: dict[str, dict] = {}     # job_id -> {"proc", "outfile", "cmd", "start"}
@@ -63,11 +65,12 @@ XBEE_BAUDRATE = 38400
 REMOTE_NAME   = "OBI"    # key in Xbee.IDs for the ground station
 READ_TIMEOUT  = 0.2      # seconds per read_data call
 
-FLIGHT_SCRIPT = os.path.join(TELEMD_DIR, "..", "control.py")
+PORTER_UNIT_TEMPLATE = "porter@.service"
 VENV_PYTHON   = os.path.join(params.home_directory, "porter_venv", "bin", "python3")
 STATUS_FILE   = "/tmp/porter_status.json"
 LOG_FILE      = os.path.join(params.home_directory, params.data_folder_name, params.current_symlink_name, params.logfile_name)
-CONFIG_FILE   = os.path.join(TELEMD_DIR, "..", "config", "default.yml")
+CONFIG_DIR = os.path.join(TELEMD_DIR, "..", "config")
+CONFIG_FILE   = os.path.join(CONFIG_DIR, "default.yml")
 LOG_TAIL_BYTES    = 40960  # bytes sent in response to 'getlog'
 SHELL_CMD_TIMEOUT = 10     # seconds before a shell command is killed
 SHELL_QUICK_WAIT = 2.0     # seconds to wait before treating a command as a background job
@@ -77,12 +80,13 @@ CAPTURE_OUTPUT  = os.path.join(TELEMD_DIR, "captured_frame.jpg")
 CAPTURE_TIMEOUT = 60        # seconds to wait for a frame to be captured
 CHRONY_TIMEOUT        = 2   # seconds to wait for a chronyc call
 CHRONY_POLL_INTERVAL  = 5   # seconds between chrony status polls
+MAX_IO_ERRORS = 25          # consecutive XBee errors (about 5 s) before giving up
 
 CMD_SOCKET_PATH = "/tmp/porter_cmd.sock"
 CMD_TIMEOUT = 5.0
 
 # status of powerd daemon
-POWER_CONTROLLER_ENABLED = True
+POWER_CONTROLLER_ENABLED = False
 POWER_CONTROLLER_STATUS_PATH = "/tmp/power_cmd.json"
 
 # logging
@@ -96,11 +100,36 @@ logger = logging.getLogger("telemd")
 _shutdown = threading.Event()
 _outbound: "queue.Queue[str]" = queue.Queue()   # messages to send
 
-_porter_process: "subprocess.Popen | None" = None
-_porter_lock = threading.Lock()
-
 _chrony_lock  = threading.Lock()
 _chrony_cache: dict = {"ok": False, "error": "not polled yet"}
+
+# telemetry packet (one slot, not a queue, to avoid flooding the XBee with old telemetry packets)
+_latest_tel: "str | None" = None
+_tel_lock = threading.Lock()
+_tel_session = uuid.uuid4().hex[:4]   # changes at every telemd restart
+_tel_seq = 0
+
+# set when telemd must exit with an error so systemd restarts it
+_crashed = threading.Event()
+
+# slow commands (start/stop/capture) run here, off the radio thread
+_slow_jobs: "queue.Queue" = queue.Queue()
+
+
+def _systemctl(*args, timeout=30):
+    return subprocess.run(["sudo", "systemctl", *args],
+                          capture_output=True, text=True, timeout=timeout)
+
+def _active_porter_units() -> list[str]:
+    try:
+        r = subprocess.run(["systemctl", "list-units", "--type=service", 
+                            "--state=active,activating,deactivating,reloading",
+                            "--no-legend", "--plain", "porter@*"],
+                        capture_output=True, text=True, timeout=5)
+    except Exception as e:
+        logger.warning(f"_active_porter_units: systemctl failed: {e}")
+        return []
+    return [line.split()[0] for line in r.stdout.splitlines() if line.strip()]
 
 
 def _send_command(cmd: str, params: dict | None = None) -> dict:
@@ -116,44 +145,27 @@ def _send_command(cmd: str, params: dict | None = None) -> dict:
             data += chunk
         return json.loads(data.decode("utf-8"))
 
-def _porter_start() -> str:
-    global _porter_process
-    with _porter_lock:
-        if _porter_process is not None and _porter_process.poll() is None:
-            return "ERR:porter already running"
-        try:
-            # Use a bash login shell so .profile is sourced and Vimba/SDK
-            # environment variables (e.g. GENICAM_GENTL64_PATH) are available.
-            _porter_process = subprocess.Popen(
-                ["bash", "--login", "-c", f'"{VENV_PYTHON}" "{FLIGHT_SCRIPT}"'],
-                cwd=TELEMD_DIR,
-            )
-            logger.info(f"porter started (PID {_porter_process.pid})")
-            return f"ACK:porter_start PID={_porter_process.pid}"
-        except Exception as e:
-            logger.error(f"Failed to start porter: {e}")
-            return f"ERR:porter_start failed: {e}"
+def _porter_start(config_name: str = "default") -> str:
+    # config_name is relative to config/, without .yml, e.g. "default" or "test_configs/starspec"
+    if not re.fullmatch(r"[A-Za-z0-9_\-/]+", config_name) or ".." in config_name:
+        return f"ERR:porter_start invalid config name {config_name!r}"
+    if not os.path.isfile(os.path.join(CONFIG_DIR, config_name + ".yml")):
+        return f"ERR:porter_start config/{config_name}.yml not found"
+    active = _active_porter_units()
+    if active:
+        return f"ERR:porter already running ({active[0]})"
+    unit = subprocess.run(["systemd-escape", f"--template={PORTER_UNIT_TEMPLATE}", config_name],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    r = _systemctl("start", unit)
+    return f"ACK:porter_start {unit}" if r.returncode == 0 else f"ERR:porter_start {r.stderr.strip()}"
+
 
 
 def _porter_stop() -> str:
-    global _porter_process
-    with _porter_lock:
-        if _porter_process is None or _porter_process.poll() is not None:
-            return "ERR:porter is not running"
-        proc = _porter_process
-    try:
-        proc.send_signal(signal.SIGINT)
-        try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            logger.warning("porter did not stop in time, sending SIGTERM")
-            proc.terminate()
-            proc.wait(timeout=5)
-        logger.info("porter stopped")
-        return "ACK:porter_stop"
-    except Exception as e:
-        logger.error(f"Failed to stop porter: {e}")
-        return f"ERR:porter_stop failed: {e}"
+    if not _active_porter_units():
+        return "ERR:porter is not running"
+    r = _systemctl("stop", "porter@*")        # blocks until stopped (max TimeoutStopSec)
+    return "ACK:porter_stop" if r.returncode == 0 else f"ERR:porter_stop {r.stderr.strip()}"
 
 # chrony 
 def _query_chrony() -> dict:
@@ -204,25 +216,57 @@ def _query_chrony() -> dict:
 def _chrony_monitor() -> None:
     logger.info("Chrony monitor started")
     while not _shutdown.is_set():
-        result = _query_chrony()
-        with _chrony_lock:
-            global _chrony_cache
-            _chrony_cache = result
-        if not result.get("ok"):
-            logger.warning(f"chrony query failed: {result.get('error')}")
+        try:
+            result = _query_chrony()
+            with _chrony_lock:
+                global _chrony_cache
+                _chrony_cache = result
+            if not result.get("ok"):
+                logger.warning(f"chrony query failed: {result.get('error')}")
+        except Exception:
+            logger.exception("Chrony monitor error")
         _shutdown.wait(CHRONY_POLL_INTERVAL)
-    logger.info("Chrony monitor stopped")
+
+
+def _camera_capture(exposure: int, gain: float) -> None:
+    try:
+        result = subprocess.run(
+            ["bash", "--login", "-c",
+             f'"{VENV_PYTHON}" "{CAPTURE_SCRIPT}" --exposure {exposure} --gain {gain}'],
+            cwd=os.path.dirname(CAPTURE_SCRIPT),
+            capture_output=True, text=True, timeout=CAPTURE_TIMEOUT,
+        )
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "no output").strip()[:300]
+            _outbound.put(f"ERR:camera.capture failed: {err}")
+            return
+        with open(CAPTURE_OUTPUT, "rb") as f:
+            img_bytes = f.read()
+        _outbound.put(f"IMGDATA:{base64.b64encode(img_bytes).decode('ascii')}")
+        logger.info(f"Sending captured frame ({len(img_bytes)} bytes JPEG)")
+    except subprocess.TimeoutExpired:
+        _outbound.put("ERR:camera.capture timed out")
+    except FileNotFoundError:
+        _outbound.put("ERR:camera.capture: captured_frame.jpg not found after capture")
+    except Exception as e:
+        _outbound.put(f"ERR:camera.capture: {e}")
+
 
 # command handler
 def _handle(raw: bytes, antenna: Xbee) -> None:
     """Decode a complete received message and enqueue a reply."""
-    cmd = raw.decode("utf-8", errors="replace").strip().lower()
+    cmd_casesensitive = raw.decode("utf-8", errors="replace").strip()
+    cmd = cmd_casesensitive.lower()
     logger.info(f"RX: {cmd!r}")
 
     if cmd == "ping":
-        value = antenna.device.get_parameter("DB")
-        rssi_dbm = -int.from_bytes(value, byteorder='big')
-        _outbound.put(f"pong - uplink RSSI: {rssi_dbm} dBm")
+        try:
+            value = antenna.device.get_parameter("DB")
+            rssi_dbm = -int.from_bytes(value, byteorder='big')
+            _outbound.put(f"pong - uplink RSSI: {rssi_dbm} dBm")
+        except Exception as e:
+            logger.warning(f"Failed to get RSSI: {e}")
+            _outbound.put("ERR:uplink RSSI: unknown")
 
     elif cmd == "reboot":
         logger.warning("Reboot command received - rebooting in 3 s")
@@ -234,11 +278,16 @@ def _handle(raw: bytes, antenna: Xbee) -> None:
         _outbound.put("ACK:shutdown")
         threading.Timer(3.0, lambda: subprocess.run(["sudo", "shutdown", "-h", "now"])).start()
 
-    elif cmd == "start":
-        _outbound.put(_porter_start())
+    elif cmd == "start" or cmd.startswith("start "):
+        parts = raw.decode("utf-8", errors="replace").split()
+        config_name = parts[1] if len(parts) > 1 else "default"
+        _outbound.put(f"ACK:start queued ({config_name})")
+        _slow_jobs.put(lambda: _outbound.put(_porter_start(config_name)))
 
     elif cmd == "stop":
-        _outbound.put(_porter_stop())
+        _outbound.put("ACK:stop queued")
+        _slow_jobs.put(lambda: _outbound.put(_porter_stop()))
+
 
     elif cmd == "getlog":
         try:
@@ -290,30 +339,8 @@ def _handle(raw: bytes, antenna: Xbee) -> None:
                 i += 1
         logger.info(f"Camera capture: exposure={exposure} gain={gain}")
         _outbound.put(f"ACK:camera.capture exposure={exposure} gain={gain} - capturing...")
-        try:
-            result = subprocess.run(
-                ["bash", "--login", "-c",
-                 f'"{VENV_PYTHON}" "{CAPTURE_SCRIPT}" --exposure {exposure} --gain {gain}'],
-                cwd=os.path.dirname(CAPTURE_SCRIPT),
-                capture_output=True,
-                text=True,
-                timeout=CAPTURE_TIMEOUT,
-            )
-            if result.returncode != 0:
-                err = (result.stderr or result.stdout or "no output").strip()[:300]
-                _outbound.put(f"ERR:camera.capture failed: {err}")
-            else:
-                with open(CAPTURE_OUTPUT, "rb") as f:
-                    img_bytes = f.read()
-                encoded = base64.b64encode(img_bytes).decode("ascii")
-                _outbound.put(f"IMGDATA:{encoded}")
-                logger.info(f"Sending captured frame ({len(img_bytes)} bytes JPEG)")
-        except subprocess.TimeoutExpired:
-            _outbound.put("ERR:camera.capture timed out")
-        except FileNotFoundError:
-            _outbound.put("ERR:camera.capture: captured_frame.jpg not found after capture")
-        except Exception as e:
-            _outbound.put(f"ERR:camera.capture: {e}")
+        _slow_jobs.put(lambda: _camera_capture(exposure, gain))
+
 
     elif raw.startswith(b"gimbal.goto"):
         raw_str = raw.decode("utf-8", errors="replace").strip()
@@ -454,20 +481,27 @@ def _handle(raw: bytes, antenna: Xbee) -> None:
 
     elif raw.startswith(b"setconfig"):
         try:
-            encoded = raw[len(b"setconfig"):]
-            data = base64.b64decode(encoded)
-            os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+            encoded = raw[len(b"setconfig"):].lstrip(b": ")
+            data = base64.b64decode(encoded, validate=True)
+            if not data:
+                raise ValueError("empty config")
+            parsed = yaml.safe_load(data)
+            if not isinstance(parsed, dict):
+                raise ValueError("config is not a YAML mapping")
+            if os.path.exists(CONFIG_FILE):
+                shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
             tmp = CONFIG_FILE + ".tmp"
             with open(tmp, "wb") as f:
                 f.write(data)
             os.replace(tmp, CONFIG_FILE)
-            _outbound.put(f"ACK:setconfig ({len(data)} bytes written)")
+            _outbound.put(f"ACK:setconfig ({len(data)} bytes written, backup in default.yml.bak)")
             logger.info(f"config/default.yml overwritten ({len(data)} bytes)")
         except Exception as e:
-            _outbound.put(f"ERR:setconfig failed: {e}")
+            _outbound.put(f"ERR:setconfig rejected: {e}")
+
 
     else:
-        reply = f"ERR:unknown command '{cmd}'"
+        reply = f"ERR:unknown command '{cmd_casesensitive}'"
         logger.warning(reply)
         _outbound.put(reply)
 
@@ -482,7 +516,11 @@ def _io_thread(antenna: Xbee) -> None:
       3. When rx_buf ends with EOM byte → dispatch complete message.
     """
     logger.info("I/O thread started")
+    global _latest_tel
     rx_buf = b""
+    last_frame_time = 0.0
+    io_errors = 0
+
 
     while not _shutdown.is_set():
 
@@ -503,20 +541,53 @@ def _io_thread(antenna: Xbee) -> None:
             except Exception as e:
                 logger.error(f"Send error: {e}")
 
+        # then the newest telemetry only, without ACK/retries: an old telemetry is never worth retrying
+        with _tel_lock:
+            tel, _latest_tel = _latest_tel, None
+        if tel is not None:
+            try:
+                if antenna.remote_device is not None:
+                    antenna.send_msg(tel, ack=True)
+                else:
+                    antenna.send_msg_broadcast(tel)
+            except Exception as e:
+                logger.warning(f"Telemetry message dropped: {e}")
+
+
         # try to receive one frame
         try:
             frame = antenna.device.read_data(timeout=READ_TIMEOUT)
+            io_errors = 0
         except TimeoutException:
             frame = None
+            io_errors = 0          # a timeout just means "nothing received"
         except Exception as e:
-            if not _shutdown.is_set():
-                logger.warning(f"read_data error: {e}")
             frame = None
+            io_errors += 1
+            if not _shutdown.is_set():
+                logger.warning(f"read_data error ({io_errors}/{MAX_IO_ERRORS}): {e}")
+            if io_errors >= MAX_IO_ERRORS:
+                logger.critical("XBee not responding, exiting so systemd restarts telemd")
+                _crashed.set()
+                _shutdown.set()
+                break
+            time.sleep(READ_TIMEOUT)   # don't spin at 100% CPU
+
 
         if frame is not None:
+            now = time.monotonic()
+            if rx_buf and now - last_frame_time > 1.0:
+                logger.warning("Discarding incomplete message after RX gap")
+                rx_buf = b""
+            last_frame_time = now
             rx_buf += frame.data
+
             if rx_buf.endswith(END_OF_MESSAGE_BYTE):
-                _handle(rx_buf[:-1], antenna)
+                try:
+                    _handle(rx_buf[:-1], antenna)
+                except Exception as e:
+                    logger.error(f"Error handling message: {e}")
+                    _outbound.put(f"ERR:Error handling message: {e}")
                 rx_buf = b""
             elif len(rx_buf) > 80 * 1024:
                 logger.warning("RX buffer overflow, discarding")
@@ -524,6 +595,13 @@ def _io_thread(antenna: Xbee) -> None:
 
     logger.info("I/O thread stopped")
 
+def _read_cpu_temp() -> "float | None":
+    """CPU temperature in °C from the Pi's thermal sensor, or None if unavailable."""
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            return round(int(f.read().strip()) / 1000.0, 1)   # value is in millidegrees
+    except (OSError, ValueError):
+        return None
 
 def _read_status() -> dict:
     try:
@@ -541,65 +619,103 @@ def _read_powerd_status() -> dict:
 
 
 def _telemetry_scheduler() -> None:
-    """Send a TEL packet every second. No device access — only enqueues."""
+    """Send a telemetry packet every second. No device access — only enqueues."""
     logger.info("Telemetry scheduler started")
+    global _tel_seq, _latest_tel
+
     while not _shutdown.is_set():
         _shutdown.wait(1.0)
-        status = _read_status()
-        if POWER_CONTROLLER_ENABLED:
-            powerd_status = _read_powerd_status()
-            status["power_controller"] = powerd_status
-        with _porter_lock:
-            porter_running = (
-                _porter_process is not None and _porter_process.poll() is None
-            )
-        status["porter"] = "running" if porter_running else "stopped"
-        with _chrony_lock:
-            status["chrony"] = dict(_chrony_cache)
-        _outbound.put(f"TEL:{json.dumps(status, separators=(',', ':'))}")
+        try:
+            status = _read_status()
+
+            total, used, free = shutil.disk_usage("/")
+            status["system"] = {
+                "time":    time.time(),
+                "hddusd":  round(used  / (1024 ** 3), 2),
+                "hddfree": round(free  / (1024 ** 3), 2),
+                "hddtot":  round(total / (1024 ** 3), 2),
+                "cputemp": _read_cpu_temp(),
+            }
+
+            if POWER_CONTROLLER_ENABLED:
+                powerd_status = _read_powerd_status()
+                status["power_controller"] = powerd_status
+            with _chrony_lock:
+                status["chrony"] = dict(_chrony_cache)
+
+            active = _active_porter_units()
+            status["porter"] = f"running ({active[0]})" if active else "stopped"
+
+            _tel_seq += 1
+            status["sid"] = _tel_session
+            status["seq"] = _tel_seq
+            tel = f"TEL:{json.dumps(status, separators=(',', ':'))}"
+            with _tel_lock:
+                _latest_tel = tel        # overwrite, never queue: only the newest telemetry is sent
+        except Exception as e:
+            logger.exception(f"Telemetry scheduler error: {e}")
+
 
 def _job_monitor() -> None:
     """Poll running background jobs; report + clean up finished ones."""
     logger.info("Job monitor started")
     while not _shutdown.is_set():
         _shutdown.wait(JOB_POLL_INTERVAL)
-
-        with _jobs_lock:
-            job_ids = list(_jobs.keys())
-
-        for jid in job_ids:
+        try:
             with _jobs_lock:
-                info = _jobs.get(jid)
-            if info is None:
-                continue
+                job_ids = list(_jobs.keys())
 
-            proc = info["proc"]
-            retcode = proc.poll()
-            if retcode is None:
-                continue   # still running
+            for jid in job_ids:
+                with _jobs_lock:
+                    info = _jobs.get(jid)
+                if info is None:
+                    continue
 
-            try:
-                with open(info["outfile"], "rb") as f:
-                    output = f.read()
-            except FileNotFoundError:
-                output = b""
-            finally:
+                proc = info["proc"]
+                retcode = proc.poll()
+                if retcode is None:
+                    continue   # still running
+
                 try:
-                    os.unlink(info["outfile"])
+                    with open(info["outfile"], "rb") as f:
+                        output = f.read()
                 except FileNotFoundError:
-                    pass
+                    output = b""
+                finally:
+                    try:
+                        os.unlink(info["outfile"])
+                    except FileNotFoundError:
+                        pass
 
-            elapsed = time.monotonic() - info["start"]
-            output = output[:CMDOUT_MAX_BYTES]
-            encoded = base64.b64encode(output).decode("ascii")
-            status = "ok" if retcode == 0 else f"exit {retcode}"
-            _outbound.put(f"ACK:job done {jid}:{status}:{elapsed:.1f}s:{encoded}")
-            logger.info(f"Job {jid} finished ({status}, {elapsed:.1f}s)")
+                elapsed = time.monotonic() - info["start"]
+                output = output[:CMDOUT_MAX_BYTES]
+                encoded = base64.b64encode(output).decode("ascii")
+                status = "ok" if retcode == 0 else f"exit {retcode}"
+                _outbound.put(f"ACK:job done {jid}:{status}:{elapsed:.1f}s:{encoded}")
+                logger.info(f"Job {jid} finished ({status}, {elapsed:.1f}s)")
 
-            with _jobs_lock:
-                _jobs.pop(jid, None)
+                with _jobs_lock:
+                    _jobs.pop(jid, None)
+        except Exception as e:
+            logger.exception(f"Job monitor error: {e}")
 
     logger.info("Job monitor stopped")
+
+def _slow_worker() -> None:
+    """Runs slow commands one at a time, so the radio thread never blocks."""
+    logger.info("Slow-command worker started")
+    while not _shutdown.is_set():
+        try:
+            job = _slow_jobs.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        try:
+            job()
+        except Exception as e:
+            logger.exception("Slow command failed")
+            _outbound.put(f"ERR:{e}")
+    logger.info("Slow-command worker stopped")
+
 
 # main
 def main() -> None:
@@ -619,15 +735,22 @@ def main() -> None:
     _outbound.put("telemd started")   # announce we are alive
 
     threads = [
-        threading.Thread(target=_io_thread, args=(antenna,), daemon=True),
-        threading.Thread(target=_telemetry_scheduler,        daemon=True),
-        threading.Thread(target=_job_monitor,                daemon=True),
-        threading.Thread(target=_chrony_monitor,             daemon=True),
+        threading.Thread(target=_io_thread, args=(antenna,), daemon=True, name="io"),
+        threading.Thread(target=_telemetry_scheduler,        daemon=True, name="telemetry"),
+        threading.Thread(target=_job_monitor,                daemon=True, name="jobs"),
+        threading.Thread(target=_chrony_monitor,             daemon=True, name="chrony"),
+        threading.Thread(target=_slow_worker,                daemon=True, name="worker"),
     ]
     for t in threads:
         t.start()
 
-    _shutdown.wait()
+    # watch the threads: if one dies, exit with an error so systemd restarts telemd
+    while not _shutdown.wait(2.0):
+        dead = [t.name for t in threads if not t.is_alive()]
+        if dead:
+            logger.critical(f"telemd thread(s) died: {dead}")
+            _crashed.set()
+            _shutdown.set()
 
     logger.info("Closing XBee...")
     try:
@@ -635,6 +758,8 @@ def main() -> None:
     except Exception:
         pass
     logger.info("telemd stopped")
+    sys.exit(1 if _crashed.is_set() else 0)
+
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from exceptions import ServiceExitError, FlagSetError
 import parameters as params
 
 from telemetry.command_server import CommandServer
+from porter.process_utils import stop_all
 
 # define timestamp for data saving
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -20,27 +21,22 @@ timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 path = os.path.dirname(os.path.realpath(__file__))
 data_directory = os.path.join(params.home_directory, params.data_folder_name)
 
-# check if there are other files with same name structure
+os.makedirs(data_directory, exist_ok=True)
+indices = []
+for folder in os.listdir(data_directory):
+    parts = folder.split("_")
+    if len(parts) == 3 and parts[0].isdigit():
+        try:
+            datetime.datetime.strptime(parts[1] + "_" + parts[2], "%Y%m%d_%H%M%S")
+            indices.append(int(parts[0]))
+        except ValueError:
+            pass
+suffix = max(indices, default=0) + 1  # first run is 001
 if params.INCREMENTAL_FILE_PREFIX:
-    suffix = 0
-    folder_list = os.listdir(data_directory)
-    # parse the suffix and timestamp from the folder names
-    for folder in folder_list:
-        # split at _
-        parts = folder.split("_")
-        if len(parts) == 3:
-            try:
-                # check if the first part is an integer
-                is_int = int(parts[0])
-                # check if the second part is a valid timestamp
-                datetime.datetime.strptime(parts[1] + "_" + parts[2], "%Y%m%d_%H%M%S")
-                # if both checks pass, increment the suffix
-                suffix += 1
-            except ValueError:
-                pass
     working_data_directory = os.path.join(data_directory, f"{suffix:03d}_{timestamp}")
 else:
     working_data_directory = os.path.join(data_directory, timestamp)
+
 logfile_path = os.path.join(working_data_directory, params.logfile_name)
 current_symlink_path = os.path.join(data_directory, params.current_symlink_name)
 
@@ -107,35 +103,42 @@ def main():
     autostart_camera_flag = True
     autostart_poi_tracking_flag = True
 
+    # exit code to return to the shell
+    exit_code = 0
+
     owned_threads = []  # track only threads we start ourselves
 
     # opening config file
-    config_path = f"{path}/{config_file}"
+    config_path = os.path.join(path, config_file)
     with open(config_path, "r") as cfg:
         config = yaml.safe_load(cfg)
         logger.info(f"Loaded configuration {config_file}")
     
     # saving a copy of the config file in the data directory
-    config_path_copy = f"{working_data_directory}/{config_file.split('/')[-1]}"
+    config_path_copy = os.path.join(working_data_directory, os.path.basename(config_file))
     with open(config_path_copy, "w") as cfg:
         yaml.dump(config, cfg)
         logger.info(f"Saved configuration {config_file} copy to {config_path_copy}")
 
     # define paths for sensors and camera data
-    sensor_path = f"{working_data_directory}/{params.sensors_folder_name}/"
-    camera_path = f"{working_data_directory}/{params.camera_folder_name}/"
+    sensor_path = os.path.join(working_data_directory, params.sensors_folder_name)
+    camera_path = os.path.join(working_data_directory, params.camera_folder_name)
     if not os.path.exists(sensor_path):
         os.mkdir(sensor_path)
     if not os.path.exists(camera_path):
         os.mkdir(camera_path)
 
-    # set up signal handlers
-    for sig in params.signal_to_catch:
-        signal.signal(sig, handler)
-
-    time.sleep(1)
+    # keep catching signals during shutdown: with SIG_DFL a second SIGINT/SIGTERM
+    # would kill python immediately, skipping close() and atexit, and orphan the binaries
+    def _during_shutdown(signum, frame):
+        logger.warning(f"Caught {signal.strsignal(signum)} during shutdown, already stopping")
 
     try:
+        # set up signal handlers
+        for sig in params.signal_to_catch:
+            signal.signal(sig, handler)
+        time.sleep(1)
+
         global_config = config.get("global", {})
         sensors = config.get("sensors", None)
         source = config.get("source", None)
@@ -160,16 +163,15 @@ def main():
         # (telemd.py owns the XBee and reads the file written here)
         cmd_server = None
         logger.info(f"Found status writer key in config")
-        update_rate = 1.0/params.STATUS_WRITER_UPDATE_RATE
         t = threads.StatusWriter(
             status_board=status_board,
-            update_rate=update_rate,
+            update_rate=params.STATUS_WRITER_UPDATE_RATE,
             flag=shutdown_flag,
             daemon=False,
         )
         t.start()
         owned_threads.append(t)
-        logger.info(f"StatusWriter started at {update_rate} Hz")
+        logger.info(f"StatusWriter started at {params.STATUS_WRITER_UPDATE_RATE} Hz")
 
         # start command server thread for handling commands from remote telemetry clients
         cmd_server = CommandServer(shutdown_flag=shutdown_flag)
@@ -227,6 +229,18 @@ def main():
 
             logger.info(f"Starting Valon synthesizer on port {source['port']} and baudrate {source['baudrate']}")
             synt = valon.Valon(source["port"], source["baudrate"])
+
+            # check if the Valon synthesizer responds to the ID command, retrying if necessary
+            valon_id = None
+            for i in range(params.ATTEMPTS):
+                logger.info(f"Attempt {i+1}/{params.ATTEMPTS} to get Valon ID...")
+                valon_id = synt.get_id()
+                if valon_id is not None:
+                    break
+                time.sleep(0.1)
+            if valon_id is None:
+                raise RuntimeError("Valon is configured but did not answer the ID request")
+            logger.info(f"Valon synthesizer initialized with ID: {valon_id}")
             
             logger.info(f"Setting Valon frequency to {source['freq'] / source['mult_factor']} Hz and power to {source['power']} dBm")
             synt.set_freq(source["freq"] / source["mult_factor"])
@@ -238,21 +252,6 @@ def main():
             else:
                 logger.info(f"Disabling Valon amplitude modulation")
                 synt.set_amd(0, 0)
-
-            attempts = params.ATTEMPTS
-            valon_id = None
-            for i in range(attempts):
-                logger.info(f"Attempt {i+1}/{attempts} to get Valon ID...")
-                valon_id = synt.get_id()
-                time.sleep(0.01)
-
-                if valon_id is not None:
-                    break
-            if valon_id is None:
-                logger.error("Failed to get Valon ID after multiple attempts.")
-                # raise Exception?
-            else:
-                logger.info(f"Valon synthesizer initialized with ID: {valon_id}")
 
             time.sleep(2)
 
@@ -279,7 +278,7 @@ def main():
                         status_board=status_board,
                         daemon=False,
                     )
-                    cmd_server.register("camera.start", t.start)
+                    cmd_server.register("camera.start", lambda cam=t: cam.start() if cam.ident is None else None)
                     if autostart_camera_flag:
                         t.start()
                     owned_threads.append(t)
@@ -347,24 +346,40 @@ def main():
 
     except (ServiceExitError, FlagSetError) as err:
         logger.error(f"Exception occurred: {err.__class__.__name__}")
+    except Exception as e:
+        logger.exception(f"Unhandled exception occurred, shutting down: {e.__class__.__name__}: {e}")
+        exit_code = 1
+    finally:
+        for sig in params.signal_to_catch:
+            signal.signal(sig, _during_shutdown)
         shutdown_flag.set()
 
-    # reset signal handlers to default
-    for sig in params.signal_to_catch:
-        signal.signal(sig, signal.SIG_DFL)
-
     logger.info("Waiting for threads to finish...")
-    time.sleep(0.5)
+    # one deadline for all threads, not a timeout per thread
+    deadline = time.monotonic() + params.SHUTDOWN_TIMEOUT
     for thread in owned_threads:
         if not thread.is_alive():
             logger.info(f"Thread {thread.name} already finished.")
             continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(f"Shutdown deadline reached, not waiting for thread {thread.name}.")
+            continue
         logger.info(f"Joining thread {thread.name}...")
-        thread.join(timeout=params.THREAD_JOIN_TIMEOUT)
+        thread.join(timeout=remaining)
         if thread.is_alive():
             logger.warning(f"Thread {thread.name} did not finish in time and is still alive.")
         else:
             logger.info(f"Thread {thread.name} has finished.")
+
+    # stop any sensor binary that its thread did not close (dead thread, join timeout, ...)
+    stop_all()
+    logger.info("Shutdown complete.")
+    logging.shutdown()
+    if any(t.is_alive() for t in owned_threads):
+        os._exit(exit_code)
+    sys.exit(exit_code)
+
 
 if __name__ == "__main__":
     main()
