@@ -23,3 +23,7 @@
 	path = modules/lager
 	url = https://github.com/POLOCALC/lager
 	branch = porter_integration
+[submodule "modules/Payload-SDK"]
+	path = modules/Payload-SDK
+	url = https://github.com/POLOCALC/Payload-SDK
+	branch = master
