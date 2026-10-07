@@ -14,7 +14,7 @@ signal_to_catch = [SIGINT, SIGTERM]
 
 SHUTDOWN_TIMEOUT = 12  # seconds for all threads to finish; keep below TimeoutStopSec=20 in porter@.service
 SENSOR_INIT_TIMEOUT = 15  # seconds to wait for a sensor thread to finish connecting/configuring
-STATUS_WRITER_UPDATE_RATE = 1  # Hz
+STATUS_WRITER_UPDATE_RATE = 1  # Hz, how often the status writer writes to disk
 
 # define paths and file/folder naming
 INCREMENTAL_FILE_PREFIX = True  # whether to add an incremental prefix to the data folder

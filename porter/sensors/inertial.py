@@ -18,13 +18,18 @@ class Inertial:
         self.core = sensor_core
         self.bus = int(bus)
         self.rate = None
+        self.imu_model = None
         self.process = None
         logger.info(f"Connected to inertial sensors {self.name}")
 
     def read_continous_binary(self, shutdown_flag, datafile_name, status_board):
         # start the inertial process through the command line
-        cmd = f"inertial --rate {self.rate} --outputdir {datafile_name} --i2c-bus {self.bus} --no-imu"
-        logger.warning("Inertial sensors: IMU is disabled (hardcoded in porter/sensors/inertial.py)")
+        cmd = f"inertial --rate {self.rate} --outputdir {datafile_name} --i2c-bus {self.bus}"
+        if self.imu:
+            cmd += f" --imu-model {self.imu_model}"
+        else:
+            cmd += " --no-imu"
+
         if self.core is not None:
             cmd += f" --core {int(self.core)}"
             
@@ -61,9 +66,12 @@ class Inertial:
 
     def configure(self, config):
         self.rate = config.get("data_rate", 200)
-
-        logger.info(f"Configured {self.name}")
-        logger.info(f"Current Inertial Sensors Data Rate: {self.rate} Hz")
+        self.imu = bool(config.get("imu", False))
+        self.imu_model = str(config.get("imu_model", "asm330lhh")).lower()
+        if self.imu and self.imu_model not in ("asm330lhh", "mpu6050"):
+            raise ValueError(f"{self.name}: imu_model must be asm330lhh or mpu6050, got '{self.imu_model}'")
+        logger.info(f"Configured {self.name}: rate {self.rate} Hz, "
+                    f"IMU {self.imu_model if self.imu else 'off'}")
 
     def close(self):
         # stop the process: SIGTERM, wait up to 3 s, then SIGKILL

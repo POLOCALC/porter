@@ -259,18 +259,29 @@ class UBX:
                 if parsed is not None and parsed.identity == "NAV-STATUS":
                     self.metadata.update({"status": parsed.gpsFix, "status_ok": parsed.gpsFixOk})
 
+                # signal strength from the raw measurements: tracked satellites and top-4 C/N0
+                if parsed is not None and parsed.identity == "RXM-RAWX":
+                    best = {}                                   # (gnssId, svId) -> strongest C/N0 of its signals
+                    for i in range(1, parsed.numMeas + 1):
+                        cno = getattr(parsed, f"cno_{i:02d}", 0)
+                        key = (getattr(parsed, f"gnssId_{i:02d}", None), getattr(parsed, f"svId_{i:02d}", None))
+                        if cno > 0 and cno > best.get(key, 0):
+                            best[key] = cno
+                    top = sorted(best.values(), reverse=True)[:4]
+                    self.metadata.update({
+                        "sats": len(best),
+                        "cno":  round(sum(top) / len(top), 1) if top else 0,
+                    })
+
+
                 # add lat lon and alt to metadata if available
                 if parsed is not None and parsed.identity == "NAV-POSLLH":
-                    self.metadata.update(
-                        {
-                            "latitude": parsed.lat,
-                            "longitude": parsed.lon,
-                            "altitude": parsed.height/1000.0,  # convert mm to m
-                        }
-                    )
+                    lat, lon, alt = parsed.lat, parsed.lon, parsed.hMSL / 1000.0     # m above mean sea level
+                    self.metadata["position"] = (lat, lon, alt, time.monotonic())
+                    self.metadata.update({"latitude": lat, "longitude": lon, "altitude": alt})
 
                 # update the status board
-                status_board.beat(self.name, self.metadata)
+                status_board.beat(self.name, {k: v for k, v in self.metadata.items() if k != "position"})
 
             self.close()
 

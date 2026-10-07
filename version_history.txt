@@ -1,3 +1,7 @@
+V4.1    - Several bug fixed
+        - Tested Valon and other RF-related components
+        - New thermal control handling for the frequency multiplier
+        - DiskGuard thread for safe acquisition stop when disk is full
 V4.0    - Raspberry Pi 5 version of porter
         - Alvium camera is handled by a python module with multithread memory writing
         - XBee modules are used for line of sight telemetry/control

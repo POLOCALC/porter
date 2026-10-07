@@ -1,190 +1,237 @@
+# --- GLOBAL PARAMETERS --- #
+# Global parameters for the Porter telemetry system.
 global:
-  name: porter
-  version: 4.0
-  description: Telemetry configuration for Porter
-  autostart_camera: True
-  autostart_poi_tracking: False
+  name: porter                                          # Name of the configuration
+  version: 4.1                                          # Version of the flight software
+  description: Configuration for Porter                 # Description of the configuration
+  autostart_camera: True                                # Whether to start the camera automatically
+  autostart_poi_tracking: True                          # Whether to start POI tracking automatically
+  disk_guard:
+    min_free_gb: 0.8                                    # Minimum free space in GB allowed before stopping acquisition
+    start_min_free_gb: 5.0                              # Minimum free space in GB to start acquisition
+    stop_margin_s: 30                                   # Margin in seconds to stop acquisition
+    warn_margin_s: 1200                                 # Margin in seconds to warn about low disk space
+    interval_s: 3                                       # Interval in seconds to check disk space
+    window_s: 45                                        # Window in seconds to compute an average disk space usage
 
+# --- SENSORS --- #
+# Sensor configuration for the Porter telemetry system. 
+# Each sensor has its own configuration block, which includes 
+# the sensor name, core number, connection type and parameters,
+# sensor information, and specific configuration settings.
 sensors:
-  GPS_1:
-    name: ZED-F9P
-    sensor_core: 3
+  GPS_1:                                                # GPS sensor configuration
+    name: ZED-F9P                                       # Name of the sensor
+    sensor_core: 3                                      # Sensor core number
     connection:
-      type: serial
+      type: serial                                      # Connection type
       parameters:
-        port: /dev/ttyAMA0
-        baudrate: 115200
+        port: /dev/ttyAMA0                              # Serial port for the GPS sensor
+        baudrate: 115200                                # Baud rate for the GPS sensor
     sensor_info:
-      type: GPS
-      manufacturer: UBlox
+      type: GPS                                         # Type of the sensor
+      manufacturer: UBlox                               # Manufacturer of the sensor
     configuration:
         NMEA1:
           output:
-            port: UART1
-            set: False
+            port: UART1                                 # Output port for NMEA messages
+            set: False                                  # Whether to set the output port for NMEA messages
         UBX:
           output:
-            port: UART1
-            set: True
+            port: UART1                                 # Output port for UBX messages
+            set: True                                   # Whether to set the output port for UBX messages
         RATE:
-          value: 2
+          value: 2                                      # Rate of the GPS sensor in Hz
         UBX_MSG:
-          output_port: UART1
+          output_port: UART1                            # Output port for UBX messages
           NAV: [
-            'POSECEF',
-            'POSLLH',
-            'CLOCK',
-            'STATUS' # this is needed to get the fix status
+            'POSECEF',                                  # this is needed to get the position in ECEF coordinates
+            'POSLLH',                                   # this is needed to get the position in latitude, longitude, and height
+            'CLOCK',                                    # this is needed to get the clock information
+            'STATUS'                                    # this is needed to get the 3D fix status
             ]
           RXM: [
-            'RAWX',
-            'SFRBX'
+            'RAWX',                                     # this is needed to get the raw measurements
+            'SFRBX'                                     # this is needed to get the raw measurements
             ]
         NMEA_MSG:
-          output_port: UART2
+          output_port: UART2                            # Output port for NMEA messages
           ID : [
-            'RMC',
-            'GST'
+            'RMC',                                      # this is needed to get the recommended minimum specific GPS/Transit data
+            'GST'                                       # this is needed to get the GPS pseudorange noise statistics
           ]
-  
+
   ADC_1:
-    name: ADS1015
-    sensor_core: 1
+    name: ADS1015                                       # Name of the sensor
+    sensor_core: 1                                      # Sensor core number
     connection:
-      type: I2C
+      type: I2C                                         # Connection type
       parameters:
-        bus: 4
-        address: 0x48
+        bus: 4                                          # I2C bus number
+        address: 0x48                                   # I2C address of the sensor
     sensor_info:
-        type: ADC
-        manufacturer: ADS
+        type: ADC                                       # Type of the sensor
+        manufacturer: ADS                               # Manufacturer of the sensor
     configuration: 
-      gain: 16
-      data_rate: 1600
+      gain: 16                                          # Gain setting for the ADC
+      data_rate: 1600                                   # Data rate for the ADC in samples per second
 
   IMX5_1:
-      name: IMX5-Sensors
-      sensor_core: 2
+      name: IMX5-Sensors                                # Name of the sensor
+      sensor_core: 2                                    # Sensor core number
       connection:
-        type: serial
+        type: serial                                    # Connection type
         parameters:
-          device: /dev/ttyACM0
-          baudrate: 921600
+          device: /dev/ttyACM0                          # Serial device for the IMX5 sensor
+          baudrate: 921600                              # baudrate
       sensor_info:
-        type: IMX5
-        manufacturer: InertialSense
+        type: IMX5                                      # Type of the sensor
+        manufacturer: InertialSense                     # Manufacturer of the sensor
       configuration:
-        imu_data_rate: 1000
-        ins_data_rate: 142
+        imu_data_rate: 1000                             # IMU data rate in Hz
+        ins_data_rate: 142                              # INS data rate in Hz
 
   DAC_1:
-    name: MCP4725
+    name: MCP4725                                       # Name of the sensor
     connection:
-      type: I2C
+      type: I2C                                         # Connection type
       parameters:
-        bus: 1
-        address: 0x60
+        bus: 1                                          # I2C bus number
+        address: 0x60                                   # I2C address of the sensor
     sensor_info:
-        type: DAC
-        manufacturer: MCP
+        type: DAC                                       # Type of the sensor
+        manufacturer: MCP                               # Manufacturer of the sensor
     configuration: 
-      voltage: 2.0
-      max_voltage: 3.3
+      voltage: 2.0                                      # Output voltage for the DAC
+      max_voltage: 3.3                                  # Maximum output voltage for the DAC
 
   INERTIAL_1:
-    name: Inertial
-    sensor_core: 2
+    name: Inertial                                      # Name of the sensor
+    sensor_core: 2                                      # Sensor core number  
     connection:
-      type: I2C
+      type: I2C                                         # Connection type
       parameters:
-        bus: 3
+        bus: 3                                          # I2C bus number
     sensor_info:
-        type: Inertial
-        manufacturer: Varios
-    configuration: 
-      data_rate: 150
+        type: Inertial                                  # Type of the sensor
+        manufacturer: Varios                            # Manufacturer of the sensor
+    configuration:
+      imu: True                                         # Whether to use the IMU
+      imu_model: asm330lhh                              # Model of the IMU (asm330lhh or mpu6050)
+      data_rate: 150                                    # Data rate for the inertial sensor in Hz
 
   # LM76_1:
-  #   name: LM76-Temp
-  #   sensor_core: 2
+  #   name: LM76-Temp                                     # Name of the sensor
+  #   sensor_core: 2                                      # Sensor core number
   #   connection:
-  #     type: I2C
+  #     type: I2C                                         # Connection type
   #     parameters:
-  #       bus: 1
-  #       address: 0x4B
+  #       bus: 1                                          # I2C bus number
+  #       address: 0x4B                                   # I2C address of the sensor
   #   sensor_info:
-  #     type: LM76
-  #     manufacturer: TexasInstruments
+  #     type: LM76                                        # Type of the sensor
+  #     manufacturer: TexasInstruments                    # Manufacturer of the sensor
   #   configuration:
-  #     interval: 10
-  #     tcrit: 35
-  #     thyst: 0
-  #     tlow: 10
+  #     interval: 10                                      # Interval in seconds to read the temperature
+  #     tcrit: 35                                         # Critical temperature in Celsius
+  #     thyst: 0                                          # Hysteresis temperature in Celsius
+  #     tlow: 10                                          # Low temperature threshold in Celsius
   #     thigh: 40
-  #     # Configuration register (power-up defaults shown)
-  #     int_mode: comparator        # comparator | event
-  #     tcrit_polarity: active_high  # active_low | active_high
-  #     int_polarity: active_low    # active_low | active_high
-  #     fault_queue: false          # true: 4 consecutive faults needed to trip
+  #                                                       # Configuration register (power-up defaults shown)
+  #     int_mode: comparator                              # comparator | event
+  #     tcrit_polarity: active_high                       # active_low | active_high
+  #     int_polarity: active_low                          # active_low | active_high
+  #     fault_queue: false                                # true: 4 consecutive faults needed to trip
 
-#source:
-#  name: VALON-5019
-#  port: /dev/ttyAMA3
-  # baudrate: 115200
-  # freq: 144
-  # power: -6.5
-  # mod_amp: 15
-  # mod_freq: 0.2
-  # mult_factor: 12
+  # source:
+  #   name: VALON-5019                                    # Name of the sensor
+  #   port: /dev/ttyAMA3                                  # Serial port for the sensor
+  #   baudrate: 115200                                    # Baud rate for the sensor
+  #   freq: 144                                           # Frequency in MHz
+  #   power: -6.5                                         # Power in dBm
+  #   mod_amp: 15                                         # Modulation amplitude in dBm
+  #   mod_freq: 0.2                                       # Modulation frequency in MHz
+  #   mult_factor: 12                                     # Multiplication factor for the frequency
 
+# --- CAMERA --- #
+# Camera configuration for the Porter telemetry system.
+# The camera configuration includes the camera name, sensor core number, 
+# exposure time, gain, image format, maximum framerate, number of threads 
+# for writing images to disk, and verbosity of the camera output.
 camera:
-  name: Alvium
-  core: 3
-  exposure: 5000
-  gain: 0.0
-  format: BayerRG8
-  max_framerate: 5
-  writing_threads: 2
-  verbosity: False
+  name: Alvium                                          # Name of the camera
+  core: 3                                               # Sensor core number
+  exposure: 5000                                        # Exposure time in microseconds
+  gain: 0.0                                             # Gain in dB
+  format: BayerRG8                                      # Image format
+  max_framerate: 5                                      # Maximum framerate in frames per second
+  writing_threads: 2                                    # Number of threads for writing images to disk
+  verbosity: False                                      # Verbosity of the camera output
+
+# --- POINTING CONTROLLER --- #
+# Pointing controller configuration for the Porter telemetry system.
+# The pointing controller is responsible for controlling the gimbal and 
+# UAV to point at a specific location or object.
+pointing_controller:
+  name: lager                                           # Name of the pointing controller
+
+  gimbal:
+    name: Gremsy T7                                     # Name of the gimbal
+    simulator: False                                    # Whether to use a simulator for the gimbal
+    connection:
+      type: serial                                      # Connection type
+      protocol: mavlink                                 # Protocol used for communication with the gimbal
+      port: /dev/ttyAMA4                                # Serial port for the gimbal
+      baudrate: 115200                                  # Baud rate for the gimbal
+      timeout: 3                                        # Timeout in seconds
+    telemetry:
+      heartbeat_frequency: 1                            # Heartbeat frequency in Hz
+      frequency: 50                                     # Telemetry frequency in Hz
+
+  uav:
+    name: DJI M600                                      # Name of the UAV
+    simulator: False                                    # Whether to use a simulator for the UAV
+    connection:
+      type: serial                                      # Connection type
+      protocol: DJI OSDK                                # Protocol used for communication with the UAV  
+      port: /dev/ttyAMA1                                # Serial port for the UAV
+      baudrate: 115200                                  # Baud rate for the UAV
+      timeout: 3                                        # Timeout in seconds
+    telemetry:
+      frequency: 50  # Hz                               # Telemetry frequency in Hz
+
+  poi:
+    name: POI                                           # Name of the point of interest
+    latitude: 45.513655422583646                        # Latitude of the point of interest
+    longitude: 9.211336171408478                        # Longitude of the point of interest
+    altitude: 300                                       # Altitude of the point of interest in meters
+    max_distance: 1000.0                                # Maximum distance from the point of interest in meters
+
+# --- POSITION SOURCE --- #
+# Position source configuration for the Porter telemetry system.
+# Position is used to determine the location of the UAV and/or the payload.
+position_source:
+  mode: auto                                              # auto | payload | uav
+  uav_max_age_s: 2.0                                      # UAV source usable only if the last uav telemetry packet is newer than this
+  uav_ok_health: [34, 48, 50]                             # rtk_pos_health values that count as a valid UAV position fix (34 = RTK float dm accuracy, 
+                                                                                                                        # 48 = RTK fixed cm accuracy, 
+                                                                                                                        # 50 = RTK fixed mm accuracy)
+  uav_hold_s: 10                                          # auto: UAV position source must stay valid this long before switching back to it
+  payload_max_age_s: 2.0                                  # Payload source usable only if its last position is newer than this
+  payload_min_fix: 3                                      # Payload source gpsFix needed (3 = 3D fix)
 
 
-#pointing_controller:
-#  name: lager
-#  gimbal:
-#    name: Gremsy T7
-#    simulator: False
-#    connection:
-#      type: serial
-#      protocol: mavlink
-#      port: /dev/null
-#      baudrate: 115200
-#      timeout: 3
-#    telemetry:
-#      heartbeat_frequency: 1  # Hz
-#      frequency: 50  # Hz
-
-#  poi:
-#    name: POI
-#    latitude: 50.9601079
-#    longitude: -1.8971433
-#    altitude: 139
-#    max_distance: 1000.0  # meters
-
-status_writer:
-  enabled: True
-  update_rate: 1
-
-
-#power_monitor:
-#  name: INA228
-#  connection:
-#    type: I2C
-#    parameters:
-#      bus: 6
-#      address: 0x40
-#  sensor_info:
-#      type: Power Monitor
-#      manufacturer: Adafruit
-#  configuration:
-#    gain: 8
-#    data_rate: 1600
+# --- NOT USED YET --- #
+# power_monitor:
+#   name: INA228
+#   connection:
+#     type: I2C
+#     parameters:
+#       bus: 6
+#       address: 0x40
+#   sensor_info:
+#       type: Power Monitor
+#       manufacturer: Adafruit
+#   configuration:
+#     gain: 8
+#     data_rate: 1600

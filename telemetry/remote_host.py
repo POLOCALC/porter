@@ -22,6 +22,7 @@ Commands:
   gimbal.mode <mode>  set gimbal mode (off, lock, or follow)
   gimbal.starttrack   start pointing controller POI tracking (if configured)
   gimbal.stoptrack    stop pointing controller POI tracking
+  position.mode <mode>  set position source (auto, payload or uav)
   $<cmd>            run shell command on payload, e.g. $ls -la
   jobs              list running background jobs
   canceljob <jid>   cancel a running background job
@@ -64,6 +65,7 @@ COMMANDS = {
     "gimbal.starttrack": "Start pointing controller POI tracking (if configured)",
     "gimbal.stoptrack": "Stop pointing controller POI tracking",
     "gimbal.mode": "Set gimbal mode (off, lock, or follow)",
+    "position.mode": "Set position source (auto, payload or uav)",
     "$<cmd>":    "Run shell command on payload  e.g. $ls -la",
     "jobs":       "List running background jobs",
     "canceljob":  "Cancel a running background job",
@@ -283,11 +285,25 @@ def _draw(stdscr, input_buf: str) -> None:
     else:
         age = time.monotonic() - tel_rx
         age_str = f"{age:.0f} s"
-        age_attr = C_OK() if age < 3 else (C_STALE() if age < 10 else C_DEAD())
+        age_attr = C_OK() if age < 10 else (C_STALE() if age < 30 else C_DEAD())
     row = _safe_addstr(stdscr, row, 2, "Telemetry age: ", C_NORMAL())
     row -= 1
     _safe_addstr(stdscr, row, 2 + len("Telemetry age: "), age_str, age_attr)
     row += 1
+    
+    disk = tel.get("disk", {})
+    if disk:
+        lvl = disk.get("level", "?")
+        lvl_attr = {"ok": C_OK(), "warning": C_STALE()}.get(lvl, C_DEAD())
+        left = disk.get("left_min")
+        left_str = f"~{left:.0f} min left" if left is not None else "no data growth"
+        line = "Disk guard: "
+        row = _safe_addstr(stdscr, row, 2, line, C_NORMAL())
+        row -= 1
+        _safe_addstr(stdscr, row, 2 + len(line),
+                     f"{lvl.upper()}  {disk.get('free_gb', 0):.1f} GB free, "
+                     f"{disk.get('rate_mbs', 0):.1f} MB/s, {left_str}", lvl_attr)
+        row += 1
 
 
     # chrony status
@@ -302,6 +318,25 @@ def _draw(stdscr, input_buf: str) -> None:
     if chrony_ref:
         row = _safe_addstr(stdscr, row, x_chrony + 4, f"Time reference: {chrony_ref}", C_NORMAL())
     row += 1
+
+    # gimbal and UAV link status (only shown if configured, i.e. present in the telemetry)
+    health = tel.get("health", {})
+    meta = tel.get("meta", {})
+    links = []
+    for name, ok_word in (("Gimbal", "CONNECTED"), ("UAV", "RECEIVING")):
+        if name in health:
+            state = health[name].get("state", "?")
+            if state == "ok":
+                links.append((f"{name}: {ok_word}", C_OK()))
+            else:
+                reason = meta.get(name, {}).get("error", state)
+                links.append((f"{name}: {reason.upper()}", C_DEAD() if state == "dead" else C_STALE()))
+    if links:
+        x = 2
+        for text, attr in links:
+            _safe_addstr(stdscr, row, x, text, attr)
+            x += len(text) + 4
+        row += 1
 
     # power controller status
     powerd = tel.get("power_controller", {})
@@ -399,6 +434,8 @@ def _tui(stdscr, antenna: Xbee) -> None:
             elif original_input.startswith("gimbal.goto"):
                 _outbound.put(original_input)
             elif original_input.startswith("gimbal.mode"):
+                _outbound.put(original_input)
+            elif original_input.startswith("position.mode"):
                 _outbound.put(original_input)
             elif original_input.startswith("gimbal.starttrack"):
                 _outbound.put(original_input)

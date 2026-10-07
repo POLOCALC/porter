@@ -8,6 +8,8 @@ class StatusBoard:
         self._lock = threading.Lock()
         self._heartbeats: dict[str, float] = {}   # name -> time.monotonic()
         self._meta: dict[str, dict] = {}           # name -> extra info
+        self._disk: dict = {}
+
 
     def beat(self, name: str, meta=None) -> None:
         """Call this from a sensor thread every loop iteration."""
@@ -50,3 +52,11 @@ class StatusBoard:
         """Return a copy of current metadata, safe to read from any thread."""
         with self._lock:
             return self._meta.copy()
+
+    def set_disk(self, info: dict) -> None:
+        with self._lock:
+            self._disk = dict(info)
+
+    def get_disk(self) -> dict:
+        with self._lock:
+            return dict(self._disk)

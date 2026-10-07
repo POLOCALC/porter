@@ -20,6 +20,7 @@ Supported commands (uplink, ground → payload):
   gimbal.mode <mode>  set gimbal mode (off, lock, or follow)
   gimbal.starttrack  start pointing controller POI tracking (if configured)
   gimbal.stoptrack   stop pointing controller POI tracking
+  position.mode <auto|payload|uav>  set the gimbal position source
   $<shell command> run a shell command and return its output (base64-encoded
 Every message ends with END_OF_MESSAGE_BYTE (0x00) as defined in Xbee.py.
 """
@@ -62,6 +63,7 @@ from Xbee import Xbee, TransmitException, END_OF_MESSAGE_BYTE
 # configuration 
 XBEE_PORT     = "/dev/ttyUSB0"
 XBEE_BAUDRATE = 38400
+TELEMETRY_PERIOD = 2.0   # seconds between telemetry packets
 REMOTE_NAME   = "OBI"    # key in Xbee.IDs for the ground station
 READ_TIMEOUT  = 0.2      # seconds per read_data call
 
@@ -84,6 +86,7 @@ MAX_IO_ERRORS = 25          # consecutive XBee errors (about 5 s) before giving 
 
 CMD_SOCKET_PATH = "/tmp/porter_cmd.sock"
 CMD_TIMEOUT = 5.0
+GIMBAL_CMD_TIMEOUT = 40.0  # gimbal.mode / gimbal.goto can block in lager while the gimbal moves
 
 # status of powerd daemon
 POWER_CONTROLLER_ENABLED = False
@@ -132,9 +135,9 @@ def _active_porter_units() -> list[str]:
     return [line.split()[0] for line in r.stdout.splitlines() if line.strip()]
 
 
-def _send_command(cmd: str, params: dict | None = None) -> dict:
+def _send_command(cmd: str, params: dict | None = None, timeout: float = CMD_TIMEOUT) -> dict:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(CMD_TIMEOUT)
+        sock.settimeout(timeout)
         sock.connect(CMD_SOCKET_PATH)
         sock.sendall((json.dumps({"cmd": cmd, "params": params or {}}) + "\n").encode("utf-8"))
         data = b""
@@ -151,6 +154,15 @@ def _porter_start(config_name: str = "default") -> str:
         return f"ERR:porter_start invalid config name {config_name!r}"
     if not os.path.isfile(os.path.join(CONFIG_DIR, config_name + ".yml")):
         return f"ERR:porter_start config/{config_name}.yml not found"
+    try:
+        with open(os.path.join(CONFIG_DIR, config_name + ".yml")) as f:
+            cfg = yaml.safe_load(f) or {}
+        min_gb = float(cfg.get("global", {}).get("disk_guard", {}).get("start_min_free_gb", 0.3))
+    except Exception:
+        min_gb = 0.8
+    free_gb = shutil.disk_usage("/").free / 1024**3
+    if free_gb < min_gb:
+        return f"ERR:porter_start only {free_gb:.1f} GB free, need {min_gb:.1f} GB"
     active = _active_porter_units()
     if active:
         return f"ERR:porter already running ({active[0]})"
@@ -158,8 +170,6 @@ def _porter_start(config_name: str = "default") -> str:
                           capture_output=True, text=True, check=True).stdout.strip()
     r = _systemctl("start", unit)
     return f"ACK:porter_start {unit}" if r.returncode == 0 else f"ERR:porter_start {r.stderr.strip()}"
-
-
 
 def _porter_stop() -> str:
     if not _active_porter_units():
@@ -251,6 +261,24 @@ def _camera_capture(exposure: int, gain: float) -> None:
     except Exception as e:
         _outbound.put(f"ERR:camera.capture: {e}")
 
+def _relay(name: str, params: dict | None = None, timeout: float = CMD_TIMEOUT) -> None:
+    """Send a command to porter's CommandServer and queue the ACK/ERR reply. Runs in its own thread."""
+    try:
+        resp = _send_command(name, params, timeout=timeout)
+        _outbound.put(f"ACK:{name} {resp.get('detail', '')}".rstrip() if resp.get("ok")
+                      else f"ERR:{name} {resp.get('error', 'unknown error')}")
+    except (ConnectionRefusedError, FileNotFoundError):
+        _outbound.put(f"ERR:{name}: porter not running")
+    except socket.timeout:
+        _outbound.put(f"ERR:{name}: no reply from porter within {timeout:.0f} s")
+    except Exception as e:
+        _outbound.put(f"ERR:{name}: {e}")
+
+
+def _relay_async(name: str, params: dict | None = None, timeout: float = CMD_TIMEOUT) -> None:
+    """Run _relay in a background thread so the radio thread is never blocked."""
+    threading.Thread(target=_relay, args=(name, params, timeout),
+                     name=f"relay-{name}", daemon=True).start()
 
 # command handler
 def _handle(raw: bytes, antenna: Xbee) -> None:
@@ -305,14 +333,7 @@ def _handle(raw: bytes, antenna: Xbee) -> None:
             _outbound.put(f"ERR:getlog failed: {e}")
 
     elif cmd.startswith("camera.start"):
-        try:
-            resp = _send_command("camera.start")
-            _outbound.put(f"ACK:camera.start {resp.get('detail','')}" if resp.get("ok")
-                        else f"ERR:camera.start {resp.get('error','unknown error')}")
-        except (ConnectionRefusedError, FileNotFoundError):
-            _outbound.put("ERR:camera.start: command socket unavailable")
-        except Exception as e:
-            _outbound.put(f"ERR:camera.start: {e}")
+        _relay_async("camera.start")
 
     elif cmd.startswith("camera.capture"):
         raw_str = raw.decode("utf-8", errors="replace").strip()
@@ -351,58 +372,31 @@ def _handle(raw: bytes, antenna: Xbee) -> None:
         yaw, pitch, roll = 0, 0, 0
         if len(tokens) >= 4:
             try:
-                yaw = float(tokens[1])
-                pitch = float(tokens[2])
-                roll = float(tokens[3])
+                yaw, pitch, roll = float(tokens[1]), float(tokens[2]), float(tokens[3])
             except ValueError:
                 _outbound.put("ERR:gimbal.goto: invalid angles")
                 return
-        try:
-            resp = _send_command("gimbal.goto", {"yaw": yaw, "pitch": pitch, "roll": roll})
-            _outbound.put(f"ACK:gimbal.goto {resp.get('detail','')}" if resp.get("ok")
-                        else f"ERR:gimbal.goto {resp.get('error','unknown error')}")
-        except (ConnectionRefusedError, FileNotFoundError):
-            _outbound.put("ERR:gimbal.goto: command socket unavailable")
-        except Exception as e:
-            _outbound.put(f"ERR:gimbal.goto: {e}")
+        _relay_async("gimbal.goto", {"yaw": yaw, "pitch": pitch, "roll": roll}, GIMBAL_CMD_TIMEOUT)
 
     elif raw.startswith(b"gimbal.mode"):
-        raw_str = raw.decode("utf-8", errors="replace").strip()
-        try:
-            tokens = shlex.split(raw_str)
-        except ValueError:
-            tokens = raw_str.split()
-        mode = "follow"
-        if len(tokens) >= 2:
-            mode = tokens[1]
-        try:
-            resp = _send_command("gimbal.mode", {"mode": mode})
-            _outbound.put(f"ACK:gimbal.mode {resp.get('detail','')}" if resp.get("ok")
-                        else f"ERR:gimbal.mode {resp.get('error','unknown error')}")
-        except (ConnectionRefusedError, FileNotFoundError):
-            _outbound.put("ERR:gimbal.mode: command socket unavailable")
-        except Exception as e:
-            _outbound.put(f"ERR:gimbal.mode: {e}")
+        tokens = raw.decode("utf-8", errors="replace").split()
+        if len(tokens) < 2:
+            _outbound.put("ERR:gimbal.mode: usage gimbal.mode <off|lock|follow|mapping|reset>")
+            return
+        _relay_async("gimbal.mode", {"mode": tokens[1].lower()}, GIMBAL_CMD_TIMEOUT)
+
+    elif cmd.startswith("position.mode"):
+        tokens = raw.decode("utf-8", errors="replace").split()
+        if len(tokens) < 2:
+            _outbound.put("ERR:position.mode: usage position.mode <auto|payload|uav>")
+        else:
+            _relay_async("position.mode", {"mode": tokens[1].lower()})
 
     elif raw.startswith(b"gimbal.starttrack"):
-        try:
-            resp = _send_command("gimbal.starttrack")
-            _outbound.put(f"ACK:gimbal.starttrack {resp.get('detail','')}" if resp.get("ok")
-                        else f"ERR:gimbal.starttrack {resp.get('error','unknown error')}")
-        except (ConnectionRefusedError, FileNotFoundError):
-            _outbound.put("ERR:gimbal.starttrack: command socket unavailable")
-        except Exception as e:
-            _outbound.put(f"ERR:gimbal.starttrack: {e}")
+        _relay_async("gimbal.starttrack")
 
     elif raw.startswith(b"gimbal.stoptrack"):
-        try:
-            resp = _send_command("gimbal.stoptrack")
-            _outbound.put(f"ACK:gimbal.stoptrack {resp.get('detail','')}" if resp.get("ok")
-                        else f"ERR:gimbal.stoptrack {resp.get('error','unknown error')}")
-        except (ConnectionRefusedError, FileNotFoundError):
-            _outbound.put("ERR:gimbal.stoptrack: command socket unavailable")
-        except Exception as e:
-            _outbound.put(f"ERR:gimbal.stoptrack: {e}")
+        _relay_async("gimbal.stoptrack")
 
     elif raw.startswith(b"$"):
         shell_cmd = raw[1:].decode("utf-8", errors="replace").strip()
@@ -619,12 +613,12 @@ def _read_powerd_status() -> dict:
 
 
 def _telemetry_scheduler() -> None:
-    """Send a telemetry packet every second. No device access — only enqueues."""
+    """Send a telemetry packet every TELEMETRY_PERIOD seconds. No device access, only enqueues."""
     logger.info("Telemetry scheduler started")
     global _tel_seq, _latest_tel
 
     while not _shutdown.is_set():
-        _shutdown.wait(1.0)
+        _shutdown.wait(TELEMETRY_PERIOD)
         try:
             status = _read_status()
 

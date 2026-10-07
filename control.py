@@ -7,8 +7,9 @@ import threading
 import time
 import yaml
 import argparse
+import shutil
 
-from exceptions import ServiceExitError, FlagSetError
+from exceptions import ServiceExitError, FlagSetError, DiskSpaceError
 import parameters as params
 
 from telemetry.command_server import CommandServer
@@ -106,7 +107,8 @@ def main():
     # exit code to return to the shell
     exit_code = 0
 
-    owned_threads = []  # track only threads we start ourselves
+     # track only threads we start ourselves
+    owned_threads = [] 
 
     # opening config file
     config_path = os.path.join(path, config_file)
@@ -132,6 +134,8 @@ def main():
     # would kill python immediately, skipping close() and atexit, and orphan the binaries
     def _during_shutdown(signum, frame):
         logger.warning(f"Caught {signal.strsignal(signum)} during shutdown, already stopping")
+
+    disk_guard = None
 
     try:
         # set up signal handlers
@@ -162,7 +166,6 @@ def main():
         # start the StatusWriter thread
         # (telemd.py owns the XBee and reads the file written here)
         cmd_server = None
-        logger.info(f"Found status writer key in config")
         t = threads.StatusWriter(
             status_board=status_board,
             update_rate=params.STATUS_WRITER_UPDATE_RATE,
@@ -172,6 +175,25 @@ def main():
         t.start()
         owned_threads.append(t)
         logger.info(f"StatusWriter started at {params.STATUS_WRITER_UPDATE_RATE} Hz")
+
+        # start the DiskGuard thread
+        disk_cfg = global_config.get("disk_guard", {}) if global_config else {}
+        start_min = float(disk_cfg.get("start_min_free_gb", 0.3)) * 1024**3
+        for p in (sensor_path, camera_path):
+            free = shutil.disk_usage(p).free
+            if free < start_min:
+                raise DiskSpaceError(f"only {free/1024**3:.1f} GB free on {p}, "
+                                     f"need {start_min/1024**3:.1f} GB to start")
+
+        disk_guard = threads.DiskGuard(
+            paths=[sensor_path, camera_path],
+            status_board=status_board,
+            shutdown_flag=shutdown_flag,
+            config=disk_cfg,
+            daemon=False,
+        )
+        disk_guard.start()
+        owned_threads.append(disk_guard)
 
         # start command server thread for handling commands from remote telemetry clients
         cmd_server = CommandServer(shutdown_flag=shutdown_flag)
@@ -311,31 +333,50 @@ def main():
                     flag=shutdown_flag,
                     status_board=status_board,
                     gnss_source=gnss_source,
+                    position_config=config.get("position_source"),
                     daemon=False,
                 )
                 t.start()
                 logger.info(f"Registering POI tracking commands for pointing controller {pointing_controller['name']} with command server...")
                 cmd_server.register("gimbal.starttrack", t.start_tracking)
                 cmd_server.register("gimbal.stoptrack", t.stop_tracking)
+                
+                GIMBAL_MODES = ("off", "lock", "follow", "mapping", "reset")
+                mode_lock = threading.Lock()
+                def _gimbal_mode(mode, pc_thread=t):
+                    if pc_thread.pc is None or pc_thread.gimbal_link != "connected":
+                        raise RuntimeError(f"gimbal not connected ({pc_thread.gimbal_link})")
+
+                    mode = str(mode).lower()
+                    if mode not in GIMBAL_MODES:
+                        raise ValueError(f"mode must be one of {GIMBAL_MODES}, got '{mode}'")
+                    if not mode_lock.acquire(blocking=False):
+                        raise RuntimeError("a gimbal mode change is already in progress")
+                    def _run():
+                        try:
+                            pc_thread.pc.gimbal.set_mode(mode)   # may block up to about 30 s
+                        except Exception:
+                            logger.exception(f"gimbal.mode {mode} failed")
+                        finally:
+                            mode_lock.release()
+                    threading.Thread(target=_run, name="gimbal-mode", daemon=True).start()
+                    return {"detail": f"switching to {mode}"}
+                cmd_server.register("gimbal.mode", _gimbal_mode)
+
+
                 if autostart_poi_tracking_flag:
                     t.start_tracking()
                 owned_threads.append(t)
                 logger.info(f"Thread started for pointing controller {pointing_controller['name']}")
 
-                # register commands for gimbal control with the command server, retrying if necessary
-                # due to serial connection latency and protocol initialization time
-                if cmd_server is not None:
-                    attempts = params.ATTEMPTS
-                    while attempts > 0:
-                        try:
-                            logger.info(f"Registering gimbal commands for pointing controller {pointing_controller['name']} with command server... attempt {params.ATTEMPTS - attempts + 1}/{params.ATTEMPTS}")
-                            cmd_server.register("gimbal.goto", t.pc.gimbal.goto)
-                            cmd_server.register("gimbal.mode", t.pc.gimbal.set_mode)
-                            attempts = 0  # exit loop if successful
-                        except Exception as e:
-                            logger.error(f"Error registering commands for pointing controller {pointing_controller['name']}: {e}")
-                        attempts -= 1
-                        time.sleep(1)
+                # gimbal.goto: refuses while the gimbal isn't connected, so it can be registered at once
+                def _gimbal_goto(yaw, pitch, roll, pc_thread=t):
+                    if pc_thread.gimbal_link != "connected":
+                        raise RuntimeError(f"gimbal not connected ({pc_thread.gimbal_link})")
+                    pc_thread.pc.gimbal.goto(yaw=yaw, pitch=pitch, roll=roll)
+                    return {"detail": f"yaw={yaw} pitch={pitch} roll={roll}"}
+                cmd_server.register("gimbal.goto", _gimbal_goto)
+
 
         # start command server thread for handling commands from remote telemetry clients
         if cmd_server is not None:
@@ -346,6 +387,9 @@ def main():
 
     except (ServiceExitError, FlagSetError) as err:
         logger.error(f"Exception occurred: {err.__class__.__name__}")
+    except DiskSpaceError as e:
+        logger.critical(f"Not starting: {e}")
+        exit_code = 2
     except Exception as e:
         logger.exception(f"Unhandled exception occurred, shutting down: {e.__class__.__name__}: {e}")
         exit_code = 1
@@ -371,6 +415,10 @@ def main():
             logger.warning(f"Thread {thread.name} did not finish in time and is still alive.")
         else:
             logger.info(f"Thread {thread.name} has finished.")
+
+    if disk_guard is not None and disk_guard.triggered.is_set():
+        logger.critical("Acquisition stopped by DiskGuard: disk almost full")
+        exit_code = 2
 
     # stop any sensor binary that its thread did not close (dead thread, join timeout, ...)
     stop_all()

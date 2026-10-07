@@ -7,10 +7,15 @@ import time
 import subprocess
 import signal
 import shutil
+from collections import deque
+from porter.PositionSource import PositionSource
 
 from porter.process_utils import start_process, stop_process
 
 logger = logging.getLogger(__name__)
+
+LINK_RETRY_S      = 10.0   # retry a failed gimbal connection / UAV port every 10 s
+GIMBAL_SILENT_S   = 3.0    # connected gimbal with no message for this long -> "lost"
 
 try:
     from sour_core import sony
@@ -375,6 +380,7 @@ class PointingController(threading.Thread):
         flag,
         status_board,
         gnss_source=None,
+        position_config=None,
         *args,
         **kwargs,
     ):
@@ -390,68 +396,193 @@ class PointingController(threading.Thread):
         self.pc = None
         self.start_track_flag = False
         self.start_track_flag_old = False
+        self.position_config = position_config or {}
+        self.position = None
+        self.gimbal_link = "connecting"     # connecting | connected | not connected | lost
+        self.uav_link = "connecting"        # connecting | port error | waiting for data | receiving | silent
+        self._gimbal_ok = False             # connect() succeeded
+        self._uav_port_ok = False           # serial port open, telemetry reader running
+        self._gimbal_retry_at = 0.0
+        self._uav_retry_at = 0.0
+        self._gimbal_connecting = False     # a connect thread is running for this link
+        self._uav_connecting = False
+
+
 
 
     def run(self):
+        # build lager's objects (no connection yet); a configuration error here is still fatal
         try:
             self.pc = PC(configuration=self.pointing_controller_config, data_folder=self.path)
-            self.pc.connect()
-            self.pc.start_telemetry()
         except Exception as e:
+            logger.error(f"Error creating pointing controller (configuration?): {e}")
             self.shutdown_flag.set()
-            logger.error(f"Error initializing pointing controller: {e}")
-            self.pc = None
-            pass
+            return
+        gimbal = getattr(self.pc, "gimbal", None)
+
+        uav = getattr(self.pc, "uav", None)
+        # only configured devices appear in the telemetry; both links open in the background
+        if gimbal is not None:
+            self.status_board.mark_failed("Gimbal", "connecting")
+            self._start_link("gimbal", self._connect_gimbal)
+        if uav is not None:
+            self.status_board.mark_failed("UAV", "connecting")
+            self._start_link("uav", self._connect_uav)
+        self.position = PositionSource(payload_meta=self.gnss_source, uav=uav, config=self.position_config)
 
         while not self.shutdown_flag.is_set():
             self.shutdown_flag.wait(1)
+            now = time.monotonic()
 
-            if self.pc is not None:
-                if self.pc.poi is not None:
-                    if self.start_track_flag and not self.start_track_flag_old:
-                        self.pc.poi.start_tracking(gimbal=self.pc.gimbal, gnss_source=self.gnss_source, forward_heading=True)
-                        logger.info(f"Pointing controller {self.pointing_controller_name} started tracking POI")
-                        self.start_track_flag_old = self.start_track_flag
-                    elif not self.start_track_flag and self.start_track_flag_old:
-                        self.pc.poi.stop_tracking()
-                        logger.info(f"Pointing controller {self.pointing_controller_name} stopped tracking POI")
-                        self.start_track_flag_old = self.start_track_flag
+            # gimbal link
+            if gimbal is not None:
+                if not self._gimbal_ok and not self._gimbal_connecting and now >= self._gimbal_retry_at:
+                    self._start_link("gimbal", self._connect_gimbal)
+                if self._gimbal_ok:
+                    age_fn = getattr(gimbal.telemetry_state, "age", None)
+                    age = age_fn() if age_fn else 0.0
+                    self.gimbal_link = "lost" if age > GIMBAL_SILENT_S else "connected"
+                if self.gimbal_link == "connected":
+                    data = gimbal.telemetry_state.get()
+                    r2 = lambda v: round(v, 2) if v is not None else None
+                    self.status_board.beat("Gimbal", {
+                        "link":  "connected",
+                        "yaw":   r2(data.get("yaw")),
+                        "pitch": r2(data.get("pitch")),
+                        "roll":  r2(data.get("roll")),
+                        "mode":  getattr(gimbal, "mode", None),
+                    })
+                elif self.gimbal_link == "lost":
+                    self.status_board.mark_failed("Gimbal", f"lost: no message for {age:.0f} s")
+                elif self.gimbal_link == "connecting":
+                    self.status_board.mark_failed("Gimbal", "connecting")
                 else:
-                    logger.warning(f"Pointing controller {self.pointing_controller_name} has no POI defined, cannot start tracking")
+                    self.status_board.mark_failed("Gimbal", f"{self.gimbal_link} (retry in {LINK_RETRY_S:.0f} s)")
 
-            data = self.pc.gimbal.telemetry_state.get()
-            yaw = data.get("yaw", None)
-            pitch = data.get("pitch", None)
-            roll = data.get("roll", None)
-            meta = {"yaw": round(yaw, 2) if yaw is not None else None, 
-                    "pitch": round(pitch, 2) if pitch is not None else None, 
-                    "roll": round(roll, 2) if roll is not None else None}
-            self.status_board.beat("Gimbal", meta)
+            # UAV link (passive: "connected" means packets are arriving)
+            if uav is not None:
+                if not self._uav_port_ok and not self._uav_connecting and now >= self._uav_retry_at:
+                    self._start_link("uav", self._connect_uav)
+                if self._uav_port_ok:
+                    age = uav.telemetry_state.age()
+                    if age == float("inf"):
+                        self.uav_link = "waiting for data"
+                    elif age > self.position.uav_max_age:
+                        self.uav_link = f"silent {age:.0f} s"
+                    else:
+                        self.uav_link = "receiving"
+                if self.uav_link == "receiving":
+                    d = uav.telemetry_state.get()
+                    r1 = lambda v: round(v, 1) if v is not None else None
+                    self.status_board.beat("UAV", {
+                        "link":    "receiving",
+                        "yaw":     r1(d.get("yaw")),
+                        "pitch":   r1(d.get("pitch")),
+                        "roll":    r1(d.get("roll")),
+                        "heading": r1(d.get("rtk_yaw_deg")),
+                        "rtk":     d.get("rtk_pos_health"),
+                    })
+                elif self.uav_link == "waiting for data":
+                    self.status_board.mark_failed("UAV", "waiting for data (passive link)")
+                else:
+                    self.status_board.mark_failed("UAV", self.uav_link)
 
-            if self.pc.poi is not None:
-                data = self.pc.poi.get_data()
-                distance = data.get("current_distance", None)
-                tracking = data.get("is_tracking", None)
-                meta = {"tracking": tracking, 
-                        "distance": round(distance, 2) if distance is not None else None}
-                self.status_board.beat("POI", meta)
+            # POI tracking: only while the gimbal is connected
+            poi = getattr(self.pc, "poi", None)
+            if poi is not None:
+                if self.start_track_flag and not self.start_track_flag_old and self.gimbal_link == "connected":
+                    poi.start_tracking(gimbal=gimbal, gnss_source=self.position, forward_heading=True)
+                    logger.info(f"Pointing controller {self.pointing_controller_name} started tracking POI")
+                    self.start_track_flag_old = True
+                elif not self.start_track_flag and self.start_track_flag_old:
+                    poi.stop_tracking()
+                    logger.info(f"Pointing controller {self.pointing_controller_name} stopped tracking POI")
+                    self.start_track_flag_old = False
+                data = poi.get_data()
+                distance = data.get("current_distance")
+                self.status_board.beat("POI", {"tracking": data.get("is_tracking"),
+                                               "distance": round(distance, 2) if distance is not None else None})
+            
+            self.position.get_position()        # refresh the source choice even when not tracking
+            self.status_board.beat("Position", self.position.status())
+
 
         logger.info(f"Stopping Pointing Controller {self.pointing_controller_name}")
         try:
-            if self.pc is not None:
-                if self.pc.poi is not None:
-                    self.pc.poi.stop_tracking()
-                self.pc.stop_telemetry()
-                self.pc.disconnect()
+            poi = getattr(self.pc, "poi", None)
+            if poi is not None:
+                poi.stop_tracking()
+            if uav is not None and self._uav_port_ok:
+                uav.stop_telemetry()
+                uav.disconnect()
+            if gimbal is not None and self._gimbal_ok:
+                gimbal.stop_telemetry()
+                gimbal.disconnect()
         except Exception as e:
             logger.error(f"Error stopping pointing controller: {e}")
-            pass
+
 
     def start_tracking(self):
         self.start_track_flag = True
     
     def stop_tracking(self):
         self.start_track_flag = False
+
+    def _connect_gimbal(self):
+        g = self.pc.gimbal
+        self.gimbal_link = "connecting"
+        try:
+            g.connect()
+            g.start_telemetry()
+            if self.shutdown_flag.is_set():          # finished after shutdown started: undo
+                g.stop_telemetry()
+                g.disconnect()
+                return
+            self._gimbal_ok = True
+            self.gimbal_link = "connected"
+            logger.info("Gimbal connected")
+        except Exception as e:
+            self._gimbal_ok = False
+            self.gimbal_link = "not connected"
+            self._gimbal_retry_at = time.monotonic() + LINK_RETRY_S
+            logger.error(f"Gimbal not connected: {e} (retry in {LINK_RETRY_S:.0f} s)")
+            try:
+                g.disconnect()      # stop the heartbeat thread and close the port before the next try
+            except Exception:
+                pass
+
+    def _connect_uav(self):
+        u = self.pc.uav
+        self.uav_link = "connecting"
+        try:
+            u.connect()             # passive link: the handshake times out after ~15 s, which is fine
+            u.start_telemetry()
+            if self.shutdown_flag.is_set():
+                u.stop_telemetry()
+                u.disconnect()
+                return
+            self._uav_port_ok = True
+            self.uav_link = "waiting for data"
+            logger.info("UAV serial port open, waiting for telemetry (passive link)")
+        except Exception as e:
+            self._uav_port_ok = False
+            self.uav_link = "port error"
+            self._uav_retry_at = time.monotonic() + LINK_RETRY_S
+            logger.error(f"UAV port error: {e} (retry in {LINK_RETRY_S:.0f} s)")
+
+
+    def _start_link(self, name, connect_fn):
+        """Run connect_fn in a background thread, at most one at a time per link."""
+        busy = f"_{name}_connecting"
+        if getattr(self, busy):
+            return
+        setattr(self, busy, True)
+        def _run():
+            try:
+                connect_fn()
+            finally:
+                setattr(self, busy, False)
+        threading.Thread(target=_run, name=f"{name}-connect", daemon=True).start()
 
 
 class StatusWriter(threading.Thread):
@@ -489,6 +620,7 @@ class StatusWriter(threading.Thread):
             payload = {
                 "health": self.status_board.get_health(),
                 "meta":   self.status_board.get_metadata(),
+                "disk":   self.status_board.get_disk(),
             }
 
             try:
@@ -506,3 +638,77 @@ class StatusWriter(threading.Thread):
         except FileNotFoundError:
             pass
         logger.info("StatusWriter stopped")
+
+class DiskGuard(threading.Thread):
+    """
+    Watches free space on the filesystems porter writes to and stops the whole
+    acquisition (clean shutdown) before any of them fills up.
+    """
+
+    def __init__(self, paths, status_board, shutdown_flag, config, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.status_board  = status_board
+        self.shutdown_flag = shutdown_flag
+        self.interval  = float(config.get("interval_s", 3))
+        self.window    = float(config.get("window_s", 45))
+        self.min_free  = float(config.get("min_free_gb", 0.8)) * 1024**3
+        self.stop_s    = float(config.get("stop_margin_s", 30))
+        self.warn_s    = float(config.get("warn_margin_s", 1200))
+        self.triggered = threading.Event()        # set when DiskGuard stopped the run
+        self.level     = "ok"
+
+        # one entry per filesystem (st_dev), so a separate data disk is checked on its own
+        self.filesystems = {}
+        for p in paths:
+            self.filesystems.setdefault(os.stat(p).st_dev, p)
+        n = max(2, int(self.window / self.interval) + 1)
+        self.history = {dev: deque(maxlen=n) for dev in self.filesystems}
+
+    def run(self):
+        logger.info(f"DiskGuard started, watching {list(self.filesystems.values())}")
+        while not self.shutdown_flag.wait(self.interval):
+            try:
+                self._check()
+            except Exception:
+                logger.exception("DiskGuard check failed")
+        logger.info("DiskGuard stopped")
+
+    def _check(self):
+        now = time.monotonic()
+        worst = None
+        for dev, path in self.filesystems.items():
+            free = shutil.disk_usage(path).free          # space available to non-root users
+            h = self.history[dev]
+            h.append((now, free))
+            t0, f0 = h[0]
+            rate = max(0.0, (f0 - free) / (now - t0)) if now > t0 else 0.0   # bytes/s
+            above_floor = free - self.min_free
+            left_s = above_floor / rate if rate > 0 else float("inf")
+            if worst is None or above_floor <= 0 or left_s < worst["left_s"]:
+                worst = {"path": path, "free": free, "rate": rate,
+                         "left_s": left_s, "above_floor": above_floor}
+
+        if worst["above_floor"] <= 0 or worst["left_s"] <= self.stop_s:
+            level = "stopped"
+        elif worst["left_s"] <= self.warn_s:
+            level = "warning"
+        else:
+            level = "ok"
+
+        self.status_board.set_disk({
+            "level":    level,
+            "free_gb":  round(worst["free"] / 1024**3, 2),
+            "rate_mbs": round(worst["rate"] / 1024**2, 2),
+            "left_min": None if worst["left_s"] == float("inf") else round(worst["left_s"] / 60, 1),
+            "path":     worst["path"],
+        })
+
+        if level != self.level:
+            log = logger.critical if level == "stopped" else logger.warning
+            log(f"DiskGuard: {self.level} -> {level} ({worst['free']/1024**3:.2f} GB free, "
+                f"{worst['rate']/1024**2:.1f} MB/s on {worst['path']})")
+            self.level = level
+
+        if level == "stopped":
+            self.triggered.set()
+            self.shutdown_flag.set()           # clean shutdown of everything: camera and sensors
