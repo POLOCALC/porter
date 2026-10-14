@@ -407,9 +407,6 @@ class PointingController(threading.Thread):
         self._gimbal_connecting = False     # a connect thread is running for this link
         self._uav_connecting = False
 
-
-
-
     def run(self):
         # build lager's objects (no connection yet); a configuration error here is still fatal
         try:
@@ -463,8 +460,22 @@ class PointingController(threading.Thread):
             if uav is not None:
                 if not self._uav_port_ok and not self._uav_connecting and now >= self._uav_retry_at:
                     self._start_link("uav", self._connect_uav)
+
+                is_alive = getattr(uav, "is_alive", None)          # DJI M400 only: psdk_telemetry process
+                if self._uav_port_ok and is_alive is not None and not is_alive():
+                    logger.error("UAV telemetry bridge exited; restarting it in "
+                                 f"{LINK_RETRY_S:.0f} s")
+                    try:
+                        uav.stop_telemetry()                        # join the threads, close the file
+                    except Exception:
+                        pass
+                    self._uav_port_ok = False
+                    self.uav_link = "bridge exited"
+                    self._uav_retry_at = now + LINK_RETRY_S
+
                 if self._uav_port_ok:
                     age = uav.telemetry_state.age()
+
                     if age == float("inf"):
                         self.uav_link = "waiting for data"
                     elif age > self.position.uav_max_age:
@@ -481,6 +492,7 @@ class PointingController(threading.Thread):
                         "roll":    r1(d.get("roll")),
                         "heading": r1(d.get("rtk_yaw_deg")),
                         "rtk":     d.get("rtk_pos_health"),
+                        "bat":     d.get("bat_percentage"),
                     })
                 elif self.uav_link == "waiting for data":
                     self.status_board.mark_failed("UAV", "waiting for data (passive link)")
@@ -555,15 +567,15 @@ class PointingController(threading.Thread):
         u = self.pc.uav
         self.uav_link = "connecting"
         try:
-            u.connect()             # passive link: the handshake times out after ~15 s, which is fine
-            u.start_telemetry()
+            u.connect()             # M600: opens the port (handshake ~15 s); M400: checks binary and /dev/ttyGS0
+            u.start_telemetry()     # M400: returns once psdk_telemetry is subscribed (up to uav.connection.timeout)
             if self.shutdown_flag.is_set():
                 u.stop_telemetry()
                 u.disconnect()
                 return
             self._uav_port_ok = True
             self.uav_link = "waiting for data"
-            logger.info("UAV serial port open, waiting for telemetry (passive link)")
+            logger.info("UAV serial port open, waiting for telemetry")
         except Exception as e:
             self._uav_port_ok = False
             self.uav_link = "port error"

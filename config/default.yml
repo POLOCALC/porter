@@ -2,10 +2,10 @@
 # Global parameters for the Porter telemetry system.
 global:
   name: porter                                          # Name of the configuration
-  version: 4.1                                          # Version of the flight software
+  version: 4.2                                          # Version of the flight software
   description: Configuration for Porter                 # Description of the configuration
-  autostart_camera: True                                # Whether to start the camera automatically
-  autostart_poi_tracking: True                          # Whether to start POI tracking automatically
+  autostart_camera: False                               # Whether to start the camera automatically
+  autostart_poi_tracking: False                         # Whether to start POI tracking automatically
   disk_guard:
     min_free_gb: 0.8                                    # Minimum free space in GB allowed before stopping acquisition
     start_min_free_gb: 5.0                              # Minimum free space in GB to start acquisition
@@ -168,45 +168,6 @@ camera:
   writing_threads: 2                                    # Number of threads for writing images to disk
   verbosity: False                                      # Verbosity of the camera output
 
-# --- POINTING CONTROLLER --- #
-# Pointing controller configuration for the Porter telemetry system.
-# The pointing controller is responsible for controlling the gimbal and 
-# UAV to point at a specific location or object.
-pointing_controller:
-  name: lager                                           # Name of the pointing controller
-
-  gimbal:
-    name: Gremsy T7                                     # Name of the gimbal
-    simulator: False                                    # Whether to use a simulator for the gimbal
-    connection:
-      type: serial                                      # Connection type
-      protocol: mavlink                                 # Protocol used for communication with the gimbal
-      port: /dev/ttyAMA4                                # Serial port for the gimbal
-      baudrate: 115200                                  # Baud rate for the gimbal
-      timeout: 3                                        # Timeout in seconds
-    telemetry:
-      heartbeat_frequency: 1                            # Heartbeat frequency in Hz
-      frequency: 50                                     # Telemetry frequency in Hz
-
-  uav:
-    name: DJI M600                                      # Name of the UAV
-    simulator: False                                    # Whether to use a simulator for the UAV
-    connection:
-      type: serial                                      # Connection type
-      protocol: DJI OSDK                                # Protocol used for communication with the UAV  
-      port: /dev/ttyAMA1                                # Serial port for the UAV
-      baudrate: 115200                                  # Baud rate for the UAV
-      timeout: 3                                        # Timeout in seconds
-    telemetry:
-      frequency: 50  # Hz                               # Telemetry frequency in Hz
-
-  poi:
-    name: POI                                           # Name of the point of interest
-    latitude: 45.513655422583646                        # Latitude of the point of interest
-    longitude: 9.211336171408478                        # Longitude of the point of interest
-    altitude: 300                                       # Altitude of the point of interest in meters
-    max_distance: 1000.0                                # Maximum distance from the point of interest in meters
-
 # --- POSITION SOURCE --- #
 # Position source configuration for the Porter telemetry system.
 # Position is used to determine the location of the UAV and/or the payload.
@@ -219,19 +180,3 @@ position_source:
   uav_hold_s: 10                                          # auto: UAV position source must stay valid this long before switching back to it
   payload_max_age_s: 2.0                                  # Payload source usable only if its last position is newer than this
   payload_min_fix: 3                                      # Payload source gpsFix needed (3 = 3D fix)
-
-
-# --- NOT USED YET --- #
-# power_monitor:
-#   name: INA228
-#   connection:
-#     type: I2C
-#     parameters:
-#       bus: 6
-#       address: 0x40
-#   sensor_info:
-#       type: Power Monitor
-#       manufacturer: Adafruit
-#   configuration:
-#     gain: 8
-#     data_rate: 1600

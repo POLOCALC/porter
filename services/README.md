@@ -6,6 +6,7 @@ systemd units and boot scripts for running PORTER on the payload's Raspberry Pi 
 |---|---|---|
 | `telemd.service` | yes | yes |
 | `porter@.service` | yes | no, started by telemd |
+| `psdk-bridge.service` | yes (`install_porter.sh`) | yes, if `psdk_telemetry` was built (Matrice 400) |
 | `i2c-config.service` + `i2c_startup_config.sh` | no, optional, by hand | optional |
 | `powerd.service` | no, powerd is not implemented | no |
 
@@ -40,7 +41,17 @@ What the settings do:
 - **`Restart=no`:** every start creates a new run folder, so porter is not restarted automatically.
 - **No `[Install]` section:** not started at boot. telemd starts it on the `start` command.
 
-Don't add `PrivateTmp=` to either unit: telemd and porter share `/tmp/porter_status.json` and `/tmp/porter_cmd.sock`.
+## psdk-bridge.service
+
+Matrice 400 only. Runs `psdk_telemetry --service` from boot (the program is in `modules/lager/modules/Payload-SDK`, see its README):
+- connects to the drone through the E-Port (`/dev/ttyGS0`, from `dji-vcom-gadget.service`) and requests 24 V on the E-Port VCC,
+- shows the POLOCALC widgets in DJI Pilot 2: **Start acquisition**, **Stop acquisition**, **POI tracking**, **Shutdown Pi** (press twice within 5 s), the **Configuration** list (the `.yml` files of `config/`, read when the service starts), and a status line in the floating window,
+- serves the drone telemetry to lager on `/tmp/psdk_telemetry.sock` (`socket:` in the `uav.connection` block of `config/default_M400.yml`),
+- sends the RC commands to telemd on `/tmp/psdk_control.sock`; telemd runs them like the XBee commands and sends back the status line.
+
+The topic rates are set on its `ExecStart` line. `Restart=always` with a 10 s delay covers "no drone yet" and "link lost". On a Matrice 600 setup it isn't needed: `sudo systemctl disable --now psdk-bridge`. Logs: `journalctl -u psdk-bridge -f`.
+
+Don't add `PrivateTmp=` to any of these units: telemd, porter and psdk-bridge share `/tmp/porter_status.json`, `/tmp/porter_cmd.sock` and the two `/tmp/psdk_*.sock` sockets.
 
 ## i2c-config.service (optional)
 

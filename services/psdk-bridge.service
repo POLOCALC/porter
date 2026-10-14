@@ -1,0 +1,31 @@
+[Unit]
+Description=POLOCALC PSDK bridge (Matrice 400): drone telemetry, 24 V E-Port power, RC widgets
+Documentation=https://github.com/POLOCALC/porter
+# the E-Port link is the USB gadget's /dev/ttyGS0
+After=dji-vcom-gadget.service
+Wants=dji-vcom-gadget.service
+
+[Service]
+Type=simple
+User=polocalc
+# the PSDK keeps its files (policy, logs) in the working directory
+WorkingDirectory=/home/polocalc
+# psdk_telemetry --service: owns the PSDK connection from boot, requests 24 V on the E-Port VCC, shows the widgets
+# in DJI Pilot 2, serves the telemetry to lager (/tmp/psdk_telemetry.sock) and the RC commands to telemd
+# (/tmp/psdk_control.sock). The topic rates are set here: lager's config doesn't change them in this mode.
+ExecStart=/home/polocalc/.local/bin/psdk_telemetry --service \
+    --config-dir /home/polocalc/flight/porter/config \
+    --widget-icons /home/polocalc/flight/porter/modules/lager/modules/Payload-SDK/samples/sample_c/platform/linux/raspberry_pi_telemetry/widget \
+    --imu 0 --fast 10 --status 5 --slow 1 --high-power 24
+# SIGINT: clean stop (unsubscribe, close the sockets)
+KillSignal=SIGINT
+TimeoutStopSec=15
+# no drone yet (exit 3), link lost (exit 6), anything else: try again
+Restart=always
+RestartSec=10s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=psdk-bridge
+
+[Install]
+WantedBy=multi-user.target

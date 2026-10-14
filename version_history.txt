@@ -1,3 +1,5 @@
+V4.2    - Porter now supports DJI Matrice 400 drone
+        - Bug fixed
 V4.1    - Several bug fixed
         - Tested Valon and other RF-related components
         - New thermal control handling for the frequency multiplier

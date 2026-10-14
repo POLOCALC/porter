@@ -321,7 +321,9 @@ def _draw(stdscr, input_buf: str) -> None:
 
     # gimbal and UAV link status (only shown if configured, i.e. present in the telemetry)
     health = tel.get("health", {})
-    meta = tel.get("meta", {})
+    meta = {n: {k: v for k, v in i.items() if k not in ("state", "age_s")}
+            for n, i in health.items() if isinstance(i, dict)}
+
     links = []
     for name, ok_word in (("Gimbal", "CONNECTED"), ("UAV", "RECEIVING")):
         if name in health:
@@ -365,7 +367,9 @@ def _draw(stdscr, input_buf: str) -> None:
     row = _safe_addstr(stdscr, row, 2, "HEALTH", C_HEADER())
 
     health = tel.get("health", {})
-    meta   = tel.get("meta", {})
+    meta = {n: {k: v for k, v in i.items() if k not in ("state", "age_s")}
+            for n, i in health.items() if isinstance(i, dict)}
+
     for name, info in health.items():
         if row >= h - 6:
             break
