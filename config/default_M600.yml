@@ -161,7 +161,7 @@ sensors:
 camera:
   name: Alvium                                          # Name of the camera
   core: 3                                               # Sensor core number
-  exposure: 5000                                        # Exposure time in microseconds
+  exposure: 20000                                       # Exposure time in microseconds
   gain: 0.0                                             # Gain in dB
   format: BayerRG8                                      # Image format
   max_framerate: 5                                      # Maximum framerate in frames per second
@@ -202,9 +202,9 @@ pointing_controller:
 
   poi:
     name: POI                                           # Name of the point of interest
-    latitude: 45.513655422583646                        # Latitude of the point of interest
-    longitude: 9.211336171408478                        # Longitude of the point of interest
-    altitude: 300                                       # Altitude of the point of interest in meters
+    latitude: 45.615820                                 # Latitude of the point of interest
+    longitude: 9.167222                                 # Longitude of the point of interest
+    altitude: 197                                       # Altitude of the point of interest in meters
     max_distance: 1000.0                                # Maximum distance from the point of interest in meters
 
 # --- POSITION SOURCE --- #

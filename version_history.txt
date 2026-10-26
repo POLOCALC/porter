@@ -1,3 +1,4 @@
+V4.2.1  - New systemctl service to handle DJI matrice 400 PSDK telemetry
 V4.2    - Porter now supports DJI Matrice 400 drone
         - Bug fixed
 V4.1    - Several bug fixed

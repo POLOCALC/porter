@@ -161,10 +161,10 @@ sensors:
 camera:
   name: Alvium                                          # Name of the camera
   core: 3                                               # Sensor core number
-  exposure: 5000                                        # Exposure time in microseconds
+  exposure: 20000                                       # Exposure time in microseconds
   gain: 0.0                                             # Gain in dB
   format: BayerRG8                                      # Image format
-  max_framerate: 5                                      # Maximum framerate in frames per second
+  max_framerate: 15                                     # Maximum framerate in frames per second
   writing_threads: 2                                    # Number of threads for writing images to disk
   verbosity: False                                      # Verbosity of the camera output
 
@@ -199,16 +199,16 @@ pointing_controller:
       timeout: 60                                       # Timeout in seconds
     telemetry:                                          # with "socket" set, psdk-bridge.service sets these rates
       imu_frequency: 0                                  # IMU navigation data group, 50 Hz only; 0 = off (115200-baud link)
-      frequency: 10                                     # Fast group: attitude, IMU, GPS/RTK, fused position, obstacles, RC
-      status_frequency: 5                               # Status group: GPS quality, flight state, anomalies, ESCs
-      slow_frequency: 1                                 # Slow group: batteries, GPS date/time, home point
+      frequency: 10                                     # Fast group: attitude, IMU, fused position, obstacles, RC
+      status_frequency: 5                               # Status group: GPS, RTK, flight state, anomalies, ESCs
+      slow_frequency: 1                                 # Slow group: battery, GPS date/time, home point
       stats_s: 5                                        # Interval in seconds to compute telemetry statistics
 
   poi:
     name: POI                                           # Name of the point of interest
-    latitude: 45.513655422583646                        # Latitude of the point of interest
-    longitude: 9.211336171408478                        # Longitude of the point of interest
-    altitude: 300                                       # Altitude of the point of interest in meters
+    latitude: 45.615820                                 # Latitude of the point of interest
+    longitude: 9.167222                                 # Longitude of the point of interest
+    altitude: 240                                       # Altitude of the point of interest in meters
     max_distance: 1000.0                                # Maximum distance from the point of interest in meters
 
 # --- POSITION SOURCE --- #

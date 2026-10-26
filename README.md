@@ -13,14 +13,15 @@ The same entry point, `control.py`, is used for bench tests, integration and fli
 
 ## How it fits together
 
-Two processes run on the Pi, each as its own systemd service:
+porter runs in its own systemd service, started and stopped by one or both links, each its own service too:
 
 ```
-telemd.service  (always running, owns the XBee radio)
-└── telemetry/telemd.py
-      │  sudo systemctl start/stop porter@<config>
+telemd.service  (while the XBee is plugged in)     rcd.service  (Matrice 400, with psdk-bridge)
+└── telemetry/telemd.py                            └── telemetry/rcd.py ◄── /tmp/psdk_control.sock ◄── DJI Pilot 2 widgets
+      │                                                  │
+      └──── payload_control.py: sudo systemctl start/stop porter@<config>, one at a time (file lock)
       ▼
-porter@<config>.service  (started on command from the ground)
+porter@<config>.service  (started on command from the ground or the RC)
 └── control.py -c config/<config>.yml
       ├── sensor threads ──► sensor binaries (ads1015, inertial, IMX5SensorModule, LM76SensorModule, alvium)
       ├── camera thread
@@ -30,7 +31,8 @@ porter@<config>.service  (started on command from the ground)
       └── CommandServer ◄── /tmp/porter_cmd.sock ◄── camera/gimbal/position commands relayed by telemd
 ```
 
-- **telemd** starts at boot and never depends on `control.py`. The radio link, the system status and shell access keep working while porter is stopped, crashes or restarts.
+- **telemd** runs whenever the XBee is plugged in (also at boot) and never depends on `control.py`. The radio link, the system status and shell access keep working while porter is stopped, crashes or restarts. Without the XBee it doesn't run at all.
+- **rcd** (Matrice 400) connects to psdk-bridge and runs the DJI Pilot 2 widget commands. It doesn't need telemd or the XBee: with the XBee removed, the RC is the only link.
 - **porter** (`control.py`) runs in its own systemd unit. Restarting telemd never stops data taking, and stopping porter always stops every sensor binary it started.
 - **The ground station**, `telemetry/remote_host.py`, runs on the ground laptop: it shows the telemetry and sends commands. See [telemetry/README.md](telemetry/README.md).
 
@@ -135,11 +137,11 @@ It:
   - ADS1015, Inertial and LM76: `build_for_pi.sh` in each submodule, which also links the binary into `~/.local/bin`,
   - Alvium: `build.sh` in Alvium-Camera-Module,
   - IMX5: links the prebuilt `modules/IMX-5-Sensor-Module/bin/IMX5SensorModule` into `~/.local/bin`,
-- **installs the systemd units:** copies `services/telemd.service` and `services/porter@.service` to `/etc/systemd/system/`, reloads systemd, then enables and restarts telemd.
+- **installs the systemd units:** copies `services/telemd.service`, `porter@.service`, `psdk-bridge.service` and `rcd.service` to `/etc/systemd/system/` and `services/99-xbee.rules` to `/etc/udev/rules.d/`, reloads systemd, then enables telemd (and psdk-bridge and rcd if `psdk_telemetry` was built). Set the XBee's USB serial in `99-xbee.rules` first, see [services/README.md](services/README.md).
 
 Every failed step is listed at the end. If any package or build fails, the systemd part is skipped and the script exits with code 1. Every step is safe to repeat. All output is also saved to `~/porter_install.log`.
 
-**Check:** `systemctl status telemd` should be `active (running)`, and the ground station should start receiving telemetry.
+**Check:** with the XBee plugged in, `systemctl status telemd` should be `active (running)`, and the ground station should start receiving telemetry. On a Matrice 400, `systemctl status rcd` should be `active (running)`, and DJI Pilot 2 should show the status line.
 
 **Binaries on `PATH`:** the sensor binaries are called by name (`ads1015`, `inertial`, `IMX5SensorModule`, `LM76SensorModule`, `alvium`). `porter@.service` starts `control.py` through `bash --login`, which loads `~/.profile`, and with it `~/.local/bin` and the Vimba/GenICam variables. Alvium's `build.sh` does not link the `alvium` binary into `~/.local/bin`: link it by hand if you use the `Alvium_Starspec` camera.
 
@@ -182,14 +184,14 @@ See [telemetry/README.md](telemetry/README.md) for all commands.
 
 ### From the drone's remote controller (Matrice 400)
 
-With `psdk-bridge.service` running, DJI Pilot 2 shows a POLOCALC widget panel. It travels over the drone's own radio link:
+With `psdk-bridge.service` and `rcd.service` running, DJI Pilot 2 shows a POLOCALC widget panel. It travels over the drone's own radio link:
 - **Start acquisition** runs porter with the configuration chosen in the **Configuration** list (the `.yml` files of `config/` when the service started; `default` is selected at start),
 - **Stop acquisition** stops it,
 - **POI tracking** starts or stops the gimbal's POI tracking,
 - **Shutdown Pi** shuts the Pi down cleanly, like the XBee `shutdown` command: press it, then press it again within 5 s to confirm,
-- the floating window shows a status line every 2 s, e.g. `RUN default_M400 12:34 | CAM 30fps | GPS 3D 24 | RTK 50 | BAT 78% | POI on 152m | 112GB | 50C`, and the reply to each command.
+- the floating window shows a status line every 2 s, e.g. `RUN default_M400 12:34 | CAM 30fps | GPS 3D 24 | RTK 50 | BAT 78% | POI on 152m | PPS | 112GB | 50C` (`PPS`, the chrony reference, or `NOSYNC`), and the reply to each command.
 
-telemd runs these commands exactly like the XBee ones (same checks, one at a time), and the ground station sees them as `RC <command>: <reply>`. The XBee stays the only link while the drone is off, and on the Matrice 600.
+rcd runs these commands with the same checks as the XBee ones (`telemetry/payload_control.py`), and the two links never start or stop porter at the same time. RC commands appear in `journalctl -u rcd`, not on the ground station. The XBee stays the only link while the drone is off, and on the Matrice 600.
 
 ### On the Pi, through systemd
 
@@ -204,7 +206,7 @@ journalctl -u 'porter@*' -f
 
 In an instance name, `-` stands for `/`. To use a config whose file name contains a real `-`, get the unit name from `systemd-escape --template=porter@.service <name>`.
 
-Only one porter instance should run at a time. telemd refuses `start` while any `porter@` unit is starting, running or stopping.
+Only one porter instance should run at a time. telemd and rcd refuse `start` while any `porter@` unit is starting or running, and wait for a stop in progress to finish.
 
 ### By hand (development)
 
@@ -432,7 +434,8 @@ The GPS is now configured by `porter/sensors/ubx.py` at every start. `test/` con
 
 | Symptom | Where to look |
 |---|---|
-| No telemetry on the ground | `journalctl -u telemd -f` on the Pi. telemd exits with an error, and systemd restarts it, if the XBee stops responding or one of its threads dies. |
+| No telemetry on the ground | `ls -l /dev/xbee` (no link: the XBee isn't seen, or the serial in `99-xbee.rules` is wrong), then `journalctl -u telemd -f`. telemd exits with an error, and systemd restarts it, if the XBee stops responding or one of its threads dies. |
+| DJI Pilot 2 shows "waiting for telemd" | rcd isn't connected: `systemctl status rcd`, `journalctl -u rcd -f` (the message text is psdk_telemetry's, it means rcd). |
 | `start` fails, or porter stops right away | `journalctl -u 'porter@*' -e`, then `flight.log` in `/home/polocalc/data/current/`. Exit code 2 means not enough disk space. |
 | A sensor shows `dead` | its `_stdout.log` in `current/sensors_data/`, and the `error` field in the telemetry |
 | `Gimbal: NOT CONNECTED` | gimbal power and serial cable; `flight.log` ("Gimbal not connected: ...") |

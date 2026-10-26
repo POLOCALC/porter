@@ -2,9 +2,12 @@
 """
 telemd.py  -  payload XBee radio daemon.
 
-Starts at boot via systemd.  Owns the XBee device and listens for commands
-from the ground station.  All device I/O runs in a single thread to avoid
-concurrent-access issues with the digi-xbee library.
+Runs as telemd.service, bound to the XBee's /dev/xbee: it starts when the radio
+is plugged in (also at boot) and stops when it is removed.  Owns the XBee device
+and listens for commands from the ground station.  All device I/O runs in a
+single thread to avoid concurrent-access issues with the digi-xbee library.
+Starting/stopping porter and the porter status come from payload_control.py,
+shared with rcd.py (the DJI Pilot 2 widgets on the Matrice 400).
 
 Supported commands (uplink, ground → payload):
   ping             reply "pong"
@@ -39,7 +42,6 @@ import socket
 import tempfile
 import time
 import uuid
-import re
 import yaml
 import shutil
 
@@ -48,12 +50,15 @@ _jobs: dict[str, dict] = {}     # job_id -> {"proc", "outfile", "cmd", "start"}
 _jobs_lock = threading.Lock()
 JOB_POLL_INTERVAL = 0.5
 
+TELEMETRY_DIR = os.path.dirname(os.path.realpath(__file__))
 # path setup
-TELEMD_DIR = os.path.dirname(os.path.realpath(__file__))
-sys.path.insert(0, TELEMD_DIR)
+sys.path.insert(0, TELEMETRY_DIR)
+
+# import shared constants and functions from payload_control.py
+import payload_control as pctrl
 
 # add porter_venv to sys.path so we can import parameters.py
-PORTER_DIR = os.path.join(TELEMD_DIR, "..")
+PORTER_DIR = os.path.join(TELEMETRY_DIR, "..")
 sys.path.insert(1, PORTER_DIR)
 import parameters as params
 
@@ -61,40 +66,26 @@ from digi.xbee.exception import TimeoutException
 from Xbee import Xbee, TransmitException, END_OF_MESSAGE_BYTE
 
 # configuration 
-XBEE_PORT     = "/dev/ttyUSB0"
-XBEE_BAUDRATE = 38400
-TELEMETRY_PERIOD = 2.0   # seconds between telemetry packets
-REMOTE_NAME   = "OBI"    # key in Xbee.IDs for the ground station
-READ_TIMEOUT  = 0.2      # seconds per read_data call
+XBEE_PORT     = "/dev/xbee"  # serial port for the XBee device
+XBEE_BAUDRATE = 38400        # serial baud rate for the XBee device
+TELEMETRY_PERIOD = 2.0       # seconds between telemetry packets
+REMOTE_NAME   = "OBI"        # key in Xbee.IDs for the ground station
+READ_TIMEOUT  = 0.2          # seconds per read_data call
 
-PORTER_UNIT_TEMPLATE = "porter@.service"
 VENV_PYTHON   = os.path.join(params.home_directory, "porter_venv", "bin", "python3")
-STATUS_FILE   = "/tmp/porter_status.json"
 LOG_FILE      = os.path.join(params.home_directory, params.data_folder_name, params.current_symlink_name, params.logfile_name)
-CONFIG_DIR = os.path.join(TELEMD_DIR, "..", "config")
-CONFIG_FILE   = os.path.join(CONFIG_DIR, "default.yml")
+CONFIG_FILE   = os.path.join(pctrl.CONFIG_DIR, "default.yml")
 LOG_TAIL_BYTES    = 40960  # bytes sent in response to 'getlog'
 SHELL_CMD_TIMEOUT = 10     # seconds before a shell command is killed
 SHELL_QUICK_WAIT = 2.0     # seconds to wait before treating a command as a background job
 CMDOUT_MAX_BYTES  = 2000   # output cap before base64 encoding
-CAPTURE_SCRIPT  = os.path.join(TELEMD_DIR, "alvium_capture.py")
-CAPTURE_OUTPUT  = os.path.join(TELEMD_DIR, "captured_frame.jpg")
+CAPTURE_SCRIPT  = os.path.join(TELEMETRY_DIR, "alvium_capture.py")
+CAPTURE_OUTPUT  = os.path.join(TELEMETRY_DIR, "captured_frame.jpg")
 CAPTURE_TIMEOUT = 60        # seconds to wait for a frame to be captured
-CHRONY_TIMEOUT        = 2   # seconds to wait for a chronyc call
 CHRONY_POLL_INTERVAL  = 5   # seconds between chrony status polls
 MAX_IO_ERRORS = 25          # consecutive XBee errors (about 5 s) before giving up
 
-CMD_SOCKET_PATH = "/tmp/porter_cmd.sock"
-CMD_TIMEOUT = 5.0
 GIMBAL_CMD_TIMEOUT = 40.0  # gimbal.mode / gimbal.goto can block in lager while the gimbal moves
-
-# status of powerd daemon
-# RC link (Matrice 400 only): psdk-bridge.service (psdk_telemetry --service) runs the widgets in DJI Pilot 2
-PSDK_CONTROL_SOCKET = "/tmp/psdk_control.sock"
-RC_STATUS_PERIOD    = 2.0   # seconds between status lines sent to the RC
-RC_RETRY_PERIOD     = 5.0   # seconds between connection attempts while psdk-bridge isn't there
-RC_TEXT_MAX         = 250   # the RC shows at most 255 characters
-GPS_FIX_NAMES = {0: "no fix", 1: "DR", 2: "2D", 3: "3D", 4: "GNSS+DR", 5: "time"}
 
 POWER_CONTROLLER_ENABLED = False
 POWER_CONTROLLER_STATUS_PATH = "/tmp/power_cmd.json"
@@ -126,115 +117,12 @@ _crashed = threading.Event()
 _slow_jobs: "queue.Queue" = queue.Queue()
 
 
-def _systemctl(*args, timeout=30):
-    return subprocess.run(["sudo", "systemctl", *args],
-                          capture_output=True, text=True, timeout=timeout)
-
-def _active_porter_units() -> list[str]:
-    try:
-        r = subprocess.run(["systemctl", "list-units", "--type=service", 
-                            "--state=active,activating,deactivating,reloading",
-                            "--no-legend", "--plain", "porter@*"],
-                        capture_output=True, text=True, timeout=5)
-    except Exception as e:
-        logger.warning(f"_active_porter_units: systemctl failed: {e}")
-        return []
-    return [line.split()[0] for line in r.stdout.splitlines() if line.strip()]
-
-
-def _send_command(cmd: str, params: dict | None = None, timeout: float = CMD_TIMEOUT) -> dict:
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(timeout)
-        sock.connect(CMD_SOCKET_PATH)
-        sock.sendall((json.dumps({"cmd": cmd, "params": params or {}}) + "\n").encode("utf-8"))
-        data = b""
-        while not data.endswith(b"\n"):
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            data += chunk
-        return json.loads(data.decode("utf-8"))
-
-def _porter_start(config_name: str = "default") -> str:
-    # config_name is relative to config/, without .yml, e.g. "default" or "test_configs/starspec"
-    if not re.fullmatch(r"[A-Za-z0-9_\-/]+", config_name) or ".." in config_name:
-        return f"ERR:porter_start invalid config name {config_name!r}"
-    if not os.path.isfile(os.path.join(CONFIG_DIR, config_name + ".yml")):
-        return f"ERR:porter_start config/{config_name}.yml not found"
-    try:
-        with open(os.path.join(CONFIG_DIR, config_name + ".yml")) as f:
-            cfg = yaml.safe_load(f) or {}
-        min_gb = float(cfg.get("global", {}).get("disk_guard", {}).get("start_min_free_gb", 0.3))
-    except Exception:
-        min_gb = 0.8
-    free_gb = shutil.disk_usage("/").free / 1024**3
-    if free_gb < min_gb:
-        return f"ERR:porter_start only {free_gb:.1f} GB free, need {min_gb:.1f} GB"
-    active = _active_porter_units()
-    if active:
-        return f"ERR:porter already running ({active[0]})"
-    unit = subprocess.run(["systemd-escape", f"--template={PORTER_UNIT_TEMPLATE}", config_name],
-                          capture_output=True, text=True, check=True).stdout.strip()
-    r = _systemctl("start", unit)
-    return f"ACK:porter_start {unit}" if r.returncode == 0 else f"ERR:porter_start {r.stderr.strip()}"
-
-def _porter_stop() -> str:
-    if not _active_porter_units():
-        return "ERR:porter is not running"
-    r = _systemctl("stop", "porter@*")        # blocks until stopped (max TimeoutStopSec)
-    return "ACK:porter_stop" if r.returncode == 0 else f"ERR:porter_stop {r.stderr.strip()}"
-
 # chrony 
-def _query_chrony() -> dict:
-    """Ask chronyd what it's currently synced to and whether it's PPS."""
-    try:
-        result = subprocess.run(
-            ["chronyc", "tracking"],
-            capture_output=True, text=True, timeout=CHRONY_TIMEOUT,
-        )
-        if result.returncode != 0:
-            return {"ok": False, "error": (result.stderr or "chronyc failed").strip()}
-
-        info = {}
-        for line in result.stdout.splitlines():
-            if ":" not in line:
-                continue
-            key, _, val = line.partition(":")
-            info[key.strip()] = val.strip()
-
-        refid_line = info.get("Reference ID", "")
-        m = re.search(r"\(([^)]+)\)", refid_line)
-        ref_name = m.group(1) if m else refid_line or "unknown"
-
-        offset_m = re.search(r"[-+]?\d*\.?\d+", info.get("Last offset", ""))
-        offset_s = float(offset_m.group()) if offset_m else None
-
-        try:
-            stratum = int(info.get("Stratum", ""))
-        except ValueError:
-            stratum = None
-
-        return {
-            "ok": True,
-            "ref": ref_name,
-            "pps_selected": "pps" in ref_name.lower(),
-            "stratum": stratum,
-            "offset_s": offset_s,
-            "leap_status": info.get("Leap status"),
-        }
-    except FileNotFoundError:
-        return {"ok": False, "error": "chronyc not found"}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "chronyc timed out"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
 def _chrony_monitor() -> None:
     logger.info("Chrony monitor started")
     while not _shutdown.is_set():
         try:
-            result = _query_chrony()
+            result = pctrl.query_chrony()
             with _chrony_lock:
                 global _chrony_cache
                 _chrony_cache = result
@@ -268,10 +156,10 @@ def _camera_capture(exposure: int, gain: float) -> None:
     except Exception as e:
         _outbound.put(f"ERR:camera.capture: {e}")
 
-def _relay(name: str, params: dict | None = None, timeout: float = CMD_TIMEOUT) -> None:
+def _relay(name: str, params: dict | None = None, timeout: float = pctrl.CMD_TIMEOUT) -> None:
     """Send a command to porter's CommandServer and queue the ACK/ERR reply. Runs in its own thread."""
     try:
-        resp = _send_command(name, params, timeout=timeout)
+        resp = pctrl.send_command(name, params, timeout=timeout)
         _outbound.put(f"ACK:{name} {resp.get('detail', '')}".rstrip() if resp.get("ok")
                       else f"ERR:{name} {resp.get('error', 'unknown error')}")
     except (ConnectionRefusedError, FileNotFoundError):
@@ -282,7 +170,7 @@ def _relay(name: str, params: dict | None = None, timeout: float = CMD_TIMEOUT) 
         _outbound.put(f"ERR:{name}: {e}")
 
 
-def _relay_async(name: str, params: dict | None = None, timeout: float = CMD_TIMEOUT) -> None:
+def _relay_async(name: str, params: dict | None = None, timeout: float = pctrl.CMD_TIMEOUT) -> None:
     """Run _relay in a background thread so the radio thread is never blocked."""
     threading.Thread(target=_relay, args=(name, params, timeout),
                      name=f"relay-{name}", daemon=True).start()
@@ -317,11 +205,11 @@ def _handle(raw: bytes, antenna: Xbee) -> None:
         parts = raw.decode("utf-8", errors="replace").split()
         config_name = parts[1] if len(parts) > 1 else "default"
         _outbound.put(f"ACK:start queued ({config_name})")
-        _slow_jobs.put(lambda: _outbound.put(_porter_start(config_name)))
+        _slow_jobs.put(lambda: _outbound.put(pctrl.porter_start(config_name)))
 
     elif cmd == "stop":
         _outbound.put("ACK:stop queued")
-        _slow_jobs.put(lambda: _outbound.put(_porter_stop()))
+        _slow_jobs.put(lambda: _outbound.put(pctrl.porter_stop()))
 
 
     elif cmd == "getlog":
@@ -418,7 +306,7 @@ def _handle(raw: bytes, antenna: Xbee) -> None:
                 shell=True,
                 stdout=outfile,
                 stderr=subprocess.STDOUT,
-                cwd=TELEMD_DIR,
+                cwd=TELEMETRY_DIR,
                 start_new_session=True,
             )
             outfile.close()
@@ -596,21 +484,6 @@ def _io_thread(antenna: Xbee) -> None:
 
     logger.info("I/O thread stopped")
 
-def _read_cpu_temp() -> "float | None":
-    """CPU temperature in °C from the Pi's thermal sensor, or None if unavailable."""
-    try:
-        with open("/sys/class/thermal/thermal_zone0/temp") as f:
-            return round(int(f.read().strip()) / 1000.0, 1)   # value is in millidegrees
-    except (OSError, ValueError):
-        return None
-
-def _read_status() -> dict:
-    try:
-        with open(STATUS_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
 def _read_powerd_status() -> dict:
     try:
         with open(POWER_CONTROLLER_STATUS_PATH, "r") as f:
@@ -627,7 +500,7 @@ def _telemetry_scheduler() -> None:
     while not _shutdown.is_set():
         _shutdown.wait(TELEMETRY_PERIOD)
         try:
-            status = _read_status()
+            status = pctrl.read_status()
             status.pop("meta", None)  # remove any old meta key
 
             total, used, free = shutil.disk_usage("/")
@@ -636,7 +509,7 @@ def _telemetry_scheduler() -> None:
                 "hddusd":  round(used  / (1024 ** 3), 2),
                 "hddfree": round(free  / (1024 ** 3), 2),
                 "hddtot":  round(total / (1024 ** 3), 2),
-                "cputemp": _read_cpu_temp(),
+                "cputemp": pctrl.read_cpu_temp(),
             }
 
             if POWER_CONTROLLER_ENABLED:
@@ -645,7 +518,7 @@ def _telemetry_scheduler() -> None:
             with _chrony_lock:
                 status["chrony"] = dict(_chrony_cache)
 
-            active = _active_porter_units()
+            active = pctrl.active_porter_units()
             status["porter"] = f"running ({active[0]})" if active else "stopped"
 
             _tel_seq += 1
@@ -719,155 +592,6 @@ def _slow_worker() -> None:
     logger.info("Slow-command worker stopped")
 
 
-# RC link (Matrice 400): widget commands from DJI Pilot 2, status line back to the RC
-_rc_frames = {}     # camera name -> (frames_captured, monotonic time), for the frame rate
-
-
-def _unit_uptime(unit: str) -> str:
-    """mm:ss (or h:mm:ss) since the systemd unit became active, '' if unknown."""
-    try:
-        r = _systemctl("show", unit, "-p", "ActiveEnterTimestampMonotonic", "--value", timeout=5)
-        seconds = int(time.monotonic() - int(r.stdout.strip()) / 1e6)
-    except Exception:
-        return ""
-    h, rest = divmod(max(seconds, 0), 3600)
-    return f"{h}:{rest // 60:02d}:{rest % 60:02d}" if h else f"{rest // 60:02d}:{rest % 60:02d}"
-
-
-def _rc_status() -> tuple:
-    """(porter running, POI tracking, one-line summary) for the RC's floating window."""
-    active = _active_porter_units()
-    parts, poi = [], False
-    if active:
-        unit = active[0]
-        config = unit.split("@", 1)[1].rsplit(".service", 1)[0] if "@" in unit else unit
-        parts.append(f"RUN {config} {_unit_uptime(unit)}".rstrip())
-        health = _read_status().get("health", {})
-        now = time.monotonic()
-        for name, info in health.items():
-            if not isinstance(info, dict):
-                continue
-            if "frames_captured" in info:                       # camera
-                frames = info["frames_captured"]
-                last = _rc_frames.get(name)
-                _rc_frames[name] = (frames, now)
-                if last and now > last[1] and frames >= last[0]:
-                    parts.append(f"CAM {(frames - last[0]) / (now - last[1]):.0f}fps")
-            elif "sats" in info and "status" in info:           # u-blox GPS
-                parts.append(f"GPS {GPS_FIX_NAMES.get(info['status'], info['status'])} {info['sats']}")
-        uav = health.get("UAV", {})
-        if isinstance(uav, dict) and uav.get("rtk") is not None:
-            parts.append(f"RTK {uav['rtk']}")
-        if isinstance(uav, dict) and uav.get("bat") is not None:
-            parts.append(f"BAT {uav['bat']}%")
-        poi_info = health.get("POI", {})
-        if isinstance(poi_info, dict) and poi_info.get("tracking"):
-            poi = True
-            distance = poi_info.get("distance")
-            parts.append(f"POI on {distance:.0f}m" if isinstance(distance, (int, float)) else "POI on")
-        errors = [n for n, i in health.items() if isinstance(i, dict) and i.get("state") in ("dead", "stale")]
-        if errors:
-            parts.append("ERR " + ",".join(errors[:3]) + ("..." if len(errors) > 3 else ""))
-    else:
-        parts.append("STOPPED")
-    parts.append(f"{shutil.disk_usage('/').free / 1024**3:.0f}GB")
-    temp = _read_cpu_temp()
-    if temp is not None:
-        parts.append(f"{temp:.0f}C")
-    return bool(active), poi, " | ".join(parts)[:RC_TEXT_MAX]
-
-
-def _rc_send(sock, lock, lines) -> None:
-    data = "".join(line.replace("\n", " ") + "\n" for line in lines).encode("utf-8")
-    with lock:
-        sock.sendall(data)
-
-
-def _rc_command(sock, lock, line: str) -> None:
-    """Run one 'CMD ...' line from psdk-bridge, in the slow-command worker (one command at a time,
-    shared with the XBee), and send the reply back to the RC."""
-    if not line.startswith("CMD "):
-        return
-    words = line[4:].split()
-    if not words:
-        return
-    logger.info(f"RC command: {' '.join(words)}")
-
-    def run():
-        action = words[0]
-        if action == "start":
-            reply = _porter_start(words[1] if len(words) > 1 else "default")
-        elif action == "stop":
-            reply = _porter_stop()
-        elif action == "shutdown":
-            logger.warning("Shutdown command received from the RC - shutting down in 3 s")
-            reply = "ACK:shutdown in 3 s"
-            threading.Timer(3.0, lambda: subprocess.run(["sudo", "shutdown", "-h", "now"])).start()
-        elif action == "poi" and len(words) > 1 and words[1] in ("on", "off"):
-            name = "gimbal.starttrack" if words[1] == "on" else "gimbal.stoptrack"
-            try:
-                resp = _send_command(name)
-                reply = f"ACK:{name}" if resp.get("ok") else f"ERR:{name} {resp.get('error', 'unknown error')}"
-            except (ConnectionRefusedError, FileNotFoundError):
-                reply = f"ERR:{name}: porter not running"
-            except Exception as e:
-                reply = f"ERR:{name}: {e}"
-        else:
-            reply = f"ERR:unknown RC command '{' '.join(words)}'"
-        logger.info(f"RC reply: {reply}")
-        _outbound.put(f"RC {' '.join(words)}: {reply}")       # the ground station sees what the RC did
-        try:
-            running, poi, _ = _rc_status()
-            _rc_send(sock, lock, [f"MSG {reply}", f"STATE {int(running)} {int(poi)}"])
-        except OSError:
-            pass                                               # psdk-bridge gone: the link thread reconnects
-
-    _slow_jobs.put(run)
-
-
-def _rc_link() -> None:
-    """Connect to psdk-bridge's control socket (Matrice 400 only) and keep the RC up to date.
-    Without psdk-bridge (Matrice 600, drone off) it just waits and retries."""
-    logger.info("RC link thread started")
-    waiting_logged = False
-    while not _shutdown.is_set():
-        if not os.path.exists(PSDK_CONTROL_SOCKET):
-            if not waiting_logged:
-                logger.info(f"RC link: waiting for psdk-bridge ({PSDK_CONTROL_SOCKET})")
-                waiting_logged = True
-            _shutdown.wait(RC_RETRY_PERIOD)
-            continue
-        lock = threading.Lock()
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                sock.connect(PSDK_CONTROL_SOCKET)
-                sock.settimeout(0.5)
-                logger.info("RC link: connected to psdk-bridge")
-                waiting_logged = False
-                buf, next_status = b"", 0.0
-                while not _shutdown.is_set():
-                    if time.monotonic() >= next_status:
-                        running, poi, text = _rc_status()
-                        _rc_send(sock, lock, [f"STATE {int(running)} {int(poi)}", f"TEXT {text}"])
-                        next_status = time.monotonic() + RC_STATUS_PERIOD
-                    try:
-                        data = sock.recv(4096)
-                    except socket.timeout:
-                        continue
-                    if not data:
-                        raise ConnectionError("psdk-bridge closed the control socket")
-                    buf += data
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
-                        _rc_command(sock, lock, line.decode("utf-8", errors="replace").strip())
-        except (OSError, ConnectionError) as e:
-            logger.info(f"RC link: {e}; retrying in {RC_RETRY_PERIOD:.0f} s")
-        except Exception as e:
-            logger.exception(f"RC link error: {e}")
-        _shutdown.wait(RC_RETRY_PERIOD)
-    logger.info("RC link thread stopped")
-
-
 # main
 def main() -> None:
     def _on_signal(signum, frame):
@@ -891,7 +615,6 @@ def main() -> None:
         threading.Thread(target=_job_monitor,                daemon=True, name="jobs"),
         threading.Thread(target=_chrony_monitor,             daemon=True, name="chrony"),
         threading.Thread(target=_slow_worker,                daemon=True, name="worker"),
-        threading.Thread(target=_rc_link,                    daemon=True, name="rc"),
     ]
     for t in threads:
         t.start()

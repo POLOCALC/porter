@@ -1,10 +1,12 @@
 # telemetry
 
-The ground link of PORTER: the daemon that owns the payload's XBee radio (`telemd.py`), the ground-station program (`remote_host.py`), and the pieces they share.
+The ground links of PORTER: the daemon that owns the payload's XBee radio (`telemd.py`), the one behind the DJI Pilot 2 widgets on the Matrice 400 (`rcd.py`), the ground-station program (`remote_host.py`), and the pieces they share.
 
 | File | Runs on | Role |
 |---|---|---|
 | `telemd.py` | Pi, as `telemd.service` | Owns the XBee radio: sends telemetry, executes commands from the ground, starts and stops porter. |
+| `rcd.py` | Pi, as `rcd.service` (Matrice 400) | DJI Pilot 2 widgets through psdk-bridge: starts and stops porter, POI tracking, shutdown, the status line on the RC. |
+| `payload_control.py` | Pi, imported by telemd and rcd | Starting and stopping porter (one at a time, file lock), the command socket, porter status, CPU temperature, chrony. |
 | `remote_host.py` | ground laptop | Terminal UI: shows the telemetry and sends commands. |
 | `Xbee.py` | both | XBee wrapper (`digi-xbee`): opening, message chunking, end-of-message marker, radio IDs. |
 | `command_server.py` | Pi, inside `control.py` | Unix socket `/tmp/porter_cmd.sock` that relays camera/gimbal commands from telemd to porter's threads. |
@@ -28,7 +30,7 @@ Settings are constants at the top of `telemd.py`:
 
 | Setting | Value |
 |---|---|
-| XBee port and baud rate | `/dev/ttyUSB0`, 38400 |
+| XBee port and baud rate | `/dev/xbee` (udev symlink, `services/99-xbee.rules`), 38400 |
 | Ground radio | `REMOTE_NAME = "OBI"`, a key in `Xbee.IDs` |
 | Status file (from porter) | `/tmp/porter_status.json` |
 | Command socket (to porter) | `/tmp/porter_cmd.sock` |
@@ -37,7 +39,7 @@ Settings are constants at the top of `telemd.py`:
 
 ### Threads
 
-telemd runs five threads. Only the I/O thread touches the radio.
+telemd runs five threads. Only the I/O thread touches the radio. The RC link that used to be a sixth thread is now `rcd.py`.
 
 | Thread | Job |
 |---|---|

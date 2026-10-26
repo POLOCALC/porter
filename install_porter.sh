@@ -192,7 +192,7 @@ echo "[5/5] Installing systemd units..."
 # install the units with this repository's real path, wherever it is cloned
 install_porter_units() {
     local unit
-    for unit in telemd.service porter@.service psdk-bridge.service; do
+    for unit in telemd.service porter@.service psdk-bridge.service rcd.service; do
         sed "s|/home/polocalc/flight/porter|$REPO_DIR|g" "$REPO_DIR/services/$unit" \
             | sudo tee "/etc/systemd/system/$unit" > /dev/null || return 1
     done
@@ -215,9 +215,24 @@ else
     echo "    $GADGET_DIR not found: dji-vcom-gadget.service not installed"
 fi
 
+# XBee -> /dev/xbee + dev-xbee.device, which telemd.service is bound to
+install_xbee_udev_rule() {
+    sudo cp "$REPO_DIR/services/99-xbee.rules" /etc/udev/rules.d/99-xbee.rules || return 1
+    sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=tty
+}
+step "udev rule for /dev/xbee" install_xbee_udev_rule
+if grep -q CHANGE_ME "$REPO_DIR/services/99-xbee.rules"; then
+    echo "    services/99-xbee.rules still has serial CHANGE_ME: telemd won't start until the XBee serial is set"
+fi
+
 step "daemon-reload"  sudo systemctl daemon-reload
+# telemd is WantedBy=dev-xbee.device: enabled here, started by systemd whenever the XBee is plugged in
 step "enable telemd"  sudo systemctl enable telemd.service
-step "restart telemd" sudo systemctl restart telemd.service
+if [ -e /dev/xbee ]; then
+    step "restart telemd" sudo systemctl restart telemd.service
+else
+    echo "    /dev/xbee not present: telemd starts when the XBee is plugged in"
+fi
 # powerd is not implemented yet: do not install or enable powerd.service
 
 if [ "$HAVE_GADGET" -eq 1 ]; then
@@ -239,12 +254,15 @@ install_vcom_udev_rule() {
 [ "$HAVE_GADGET" = 1 ] && step "udev rule for /dev/ttyGS0" install_vcom_udev_rule
 
 # PSDK bridge (Matrice 400): drone link from boot, 24 V on the E-Port, RC widgets. Needs psdk_telemetry (built
-# above only when the DJI credentials are set). On a Matrice 600 setup: sudo systemctl disable --now psdk-bridge
+# above only when the DJI credentials are set). On a Matrice 600 setup: sudo systemctl disable --now psdk-bridge rcd
 if [ "$HAVE_GADGET" = 1 ] && [ -x "$BIN_DIR/psdk_telemetry" ]; then
     step "enable psdk-bridge"  sudo systemctl enable psdk-bridge.service
     step "restart psdk-bridge" sudo systemctl restart psdk-bridge.service
+    # rcd: the DJI Pilot 2 widgets <-> porter, independent of telemd and the XBee
+    step "enable rcd"  sudo systemctl enable rcd.service
+    step "restart rcd" sudo systemctl restart rcd.service
 else
-    echo "    psdk_telemetry not built or USB gadget missing: psdk-bridge.service installed but not enabled"
+    echo "    psdk_telemetry not built or USB gadget missing: psdk-bridge.service and rcd.service installed but not enabled"
 fi
 
 

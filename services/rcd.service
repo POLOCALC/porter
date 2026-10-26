@@ -1,0 +1,23 @@
+[Unit]
+Description=Porter RC link (Matrice 400): DJI Pilot 2 widgets <-> porter
+Documentation=https://github.com/POLOCALC/porter
+# Wants, not BindsTo: psdk-bridge restarts whenever the drone link drops, rcd just reconnects
+After=psdk-bridge.service
+Wants=psdk-bridge.service
+
+[Service]
+Type=simple
+User=polocalc
+WorkingDirectory=/home/polocalc/flight/porter
+# Use the project venv so porter.* packages are importable
+ExecStart=/home/polocalc/porter_venv/bin/python3 /home/polocalc/flight/porter/telemetry/rcd.py
+# Restart automatically if rcd crashes
+Restart=on-failure
+RestartSec=5s
+# Logs visible with: journalctl -u rcd -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rcd
+
+[Install]
+WantedBy=multi-user.target

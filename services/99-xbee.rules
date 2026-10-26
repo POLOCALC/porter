@@ -1,0 +1,5 @@
+# XBee radio of the payload -> /dev/xbee, and a systemd device unit (dev-xbee.device) that telemd.service binds to.
+# Matched on the USB adapter's serial number, so no other USB-serial device can be taken for the XBee.
+# Find the values with the XBee plugged in:  udevadm info -a -n /dev/ttyUSB0 | grep -E 'idVendor|idProduct|serial'
+# (use the first ATTRS{serial} that appears, the one of the USB device itself)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{serial}=="D308F9K4", SYMLINK+="xbee", TAG+="systemd"
