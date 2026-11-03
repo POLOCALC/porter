@@ -22,4 +22,4 @@
 [submodule "modules/lager"]
 	path = modules/lager
 	url = https://github.com/POLOCALC/lager
-	branch = porter_integration
+	branch = observe_POI_w_roll
