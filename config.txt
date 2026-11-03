@@ -74,3 +74,6 @@ dtoverlay=dwc2,dr_mode=peripheral
 
 # use max current for the USB hub
 usb_max_current_enable=1
+
+# set GPIO pin 17 to low at boot (power supply enebler for Gremsy gimbal)
+gpio=17=op,dl
