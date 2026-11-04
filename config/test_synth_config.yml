@@ -1,0 +1,38 @@
+#source:
+#    name: valon                                      	    # Name of the synth
+#    config:
+#        port: /dev/ttyAMA3                                  # Serial port for the sensor
+#        baudrate: 115200                                    # Baud rate for the sensor
+#        freq: 144                                           # Frequency in GHz
+#        mult_factor: 12                                     # Multiplication factor for the frequency
+#        power: -6.5                                         # Power in dBm
+#        mod_amp: 15                                         # Modulation amplitude in dBm
+#        mod_freq: 37                                        # Modulation frequency in MHz
+        
+# single channel
+source:
+    name: synthhd
+    config:
+        devpath: /dev/ttyACM0                               # Serial port for the sensor
+        channel: 0     			            # RF output channel to enable
+        freq: 93                                         # Frequency in GHz
+        mult_factor: 6                                    # Multiplication factor for the frequency
+        power: 1                                         # Power in dBm
+        mod_amp: 25                                       # Modulation amplitude in dBm
+        mod_freq: 37                                      # Modulation frequency in Hz
+	mod_funct: square_wave      			    # AM function 'square_wave' or 'sine'
+	
+# double channel
+#source:
+#    name: synthhd
+#    config:
+#        devpath: /dev/ttyACM0                               # Serial port for the sensor
+#        channel: [0,1]				            # RF output channel to enable
+#        freq: [93,280]                                      # Frequency in GHz
+#        mult_factor: [12,18]                                # Multiplication factor for the frequency
+#        power: [1,1]                                        # Power in dBm
+#        mod_amp: [25,25]                                    # Modulation amplitude in dBm
+#        mod_freq: [37,37]                                   # Modulation frequency in Hz
+#	mod_funct: [square_wave,square_wave]    	    # AM function 'square_wave' or 'sine'
+        
+        

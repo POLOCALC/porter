@@ -74,6 +74,8 @@ import porter.sensors.sensors_handler as sh
 import porter.threads as threads
 import porter.valon as valon
 from telemetry.StatusBoard import StatusBoard
+from porter.windfreak.synth_hd import SynthHD
+
 
 # initialize the status board
 status_board = StatusBoard()
@@ -245,35 +247,23 @@ def main():
                         logger.error(f"GPS sensor {name} did not initialize in time, no GNSS source available")
                     break
 
-        # start Valon synthesizer if source is configured
+        # start synthesizer if source is configured
         if source is not None:
             logger.info(f"Found source key in config")
 
-            logger.info(f"Starting Valon synthesizer on port {source['port']} and baudrate {source['baudrate']}")
-            synt = valon.Valon(source["port"], source["baudrate"])
+            if source["name"]=="valon":
+                logger.info(f"Starting Valon synthesizer on port {source["config"]['port']} and baudrate {source["config"]['baudrate']}")
+                synt = valon.Valon(source["config"]["port"], source["config"]["baudrate"])
 
-            # check if the Valon synthesizer responds to the ID command, retrying if necessary
-            valon_id = None
-            for i in range(params.ATTEMPTS):
-                logger.info(f"Attempt {i+1}/{params.ATTEMPTS} to get Valon ID...")
-                valon_id = synt.get_id()
-                if valon_id is not None:
-                    break
-                time.sleep(0.1)
-            if valon_id is None:
-                raise RuntimeError("Valon is configured but did not answer the ID request")
-            logger.info(f"Valon synthesizer initialized with ID: {valon_id}")
+            elif source["name"]=="synthhd":
+                logger.info(f"Starting Valon synthesizer on port {source["config"]['port']} and baudrate {source["config"]['baudrate']}")
+                synt = SynthHD(source["config"]["devpath"])
+
+            # check if the synthesizer responds to the ID command, retrying if necessary
+            synt.check_status(params.ATTEMPTS)
             
-            logger.info(f"Setting Valon frequency to {source['freq'] / source['mult_factor']} Hz and power to {source['power']} dBm")
-            synt.set_freq(source["freq"] / source["mult_factor"])
-            synt.set_pwr(source["power"])
-
-            if source["mod_freq"] > 0:
-                logger.info(f"Setting Valon modulation frequency to {source['mod_freq']} Hz and amplitude to {source['mod_amp']}")
-                synt.set_amd(source["mod_amp"], source["mod_freq"])
-            else:
-                logger.info(f"Disabling Valon amplitude modulation")
-                synt.set_amd(0, 0)
+            # configure the emission of the frequency synthesizer
+            synt.configure(source["config"])
 
             time.sleep(2)
 

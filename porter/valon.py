@@ -185,6 +185,39 @@ class Valon:
                     break
                 time.sleep(0.1)
 
+    def check_status(self,N_attemps):
+        """
+        Check the status of the synthesizer by asking the ID.
+        If it is not able to get the ID, it raise a RuntimeError.
+        """
+        synth_id = None
+        for i in range(N_attemps):
+            logger.info(f"Attempt {i+1}/{N_attemps} to get synth ID...")
+            synth_id = self.get_id()
+            if synth_id is not None:
+                break
+            time.sleep(0.1)
+        if synth_id is None:
+            raise RuntimeError("Synth is configured but did not answer the ID request")
+        logger.info(f"Synthesizer initialized with ID: {synth_id}")
+        
+    def configure(self,config):
+        """
+        Configure the synthesizer according to the config dictionary.
+        Parameters:
+        - config (dict): config dictionary to configure the emission of the synthesizer
+        """
+        logger.info(f"Setting synth frequency to {config['freq'] / config['mult_factor']} GHz and power to {config['power']} dBm")
+        self.set_freq(config["freq"] / config["mult_factor"] * 1e3) # valon wants MHz, config["freq"] is GHz
+        self.set_pwr(config["power"])
+
+        if config["mod_freq"] > 0:
+            logger.info(f"Setting synth modulation frequency to {config['mod_freq']} Hz and amplitude to {config['mod_amp']} dB")
+            self.set_amd(config["mod_amp"], config["mod_freq"])
+        else:
+            logger.info(f"Disabling synth amplitude modulation")
+            config.set_amd(0, 0)
+
     def close_connection(self, valon_off=False):
         """
         Close connection with a Valon
