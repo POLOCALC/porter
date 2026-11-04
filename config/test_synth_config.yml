@@ -1,38 +1,27 @@
-#source:
-#    name: valon                                      	    # Name of the synth
-#    config:
-#        port: /dev/ttyAMA3                                  # Serial port for the sensor
-#        baudrate: 115200                                    # Baud rate for the sensor
-#        freq: 144                                           # Frequency in GHz
-#        mult_factor: 12                                     # Multiplication factor for the frequency
-#        power: -6.5                                         # Power in dBm
-#        mod_amp: 15                                         # Modulation amplitude in dBm
-#        mod_freq: 37                                        # Modulation frequency in MHz
-        
-# single channel
 source:
-    name: synthhd
-    config:
-        devpath: /dev/ttyACM0                               # Serial port for the sensor
-        channel: 0     			            # RF output channel to enable
-        freq: 93                                         # Frequency in GHz
-        mult_factor: 6                                    # Multiplication factor for the frequency
-        power: 1                                         # Power in dBm
-        mod_amp: 25                                       # Modulation amplitude in dBm
-        mod_freq: 37                                      # Modulation frequency in Hz
-	mod_funct: square_wave      			    # AM function 'square_wave' or 'sine'
-	
-# double channel
-#source:
-#    name: synthhd
-#    config:
-#        devpath: /dev/ttyACM0                               # Serial port for the sensor
-#        channel: [0,1]				            # RF output channel to enable
-#        freq: [93,280]                                      # Frequency in GHz
-#        mult_factor: [12,18]                                # Multiplication factor for the frequency
-#        power: [1,1]                                        # Power in dBm
-#        mod_amp: [25,25]                                    # Modulation amplitude in dBm
-#        mod_freq: [37,37]                                   # Modulation frequency in Hz
-#	mod_funct: [square_wave,square_wave]    	    # AM function 'square_wave' or 'sine'
-        
-        
+  name: synthhd
+  config:
+    port: /dev/ttyACM0   # Serial port for the sensor
+    channel: 0              # RF output channel to enable
+    freq: 93                # Frequency in GHz
+    mult_factor: 6          # Multiplication factor for the frequency
+    power: -10                # Power in dBm
+    mod_amp: 5             # Modulation amplitude in dBm
+    mod_freq: 10            # Modulation frequency in Hz
+    mod_funct: sine  # AM function 'square_wave' or 'sine'
+
+sensors:
+  ADC_1:
+    name: ADS1015         # Name of the sensor
+    sensor_core: 1        # Sensor core number
+    connection:
+      type: I2C           # Connection type
+      parameters:
+        bus: 4            # I2C bus number
+        address: 0x48     # I2C address of the sensor
+    sensor_info:
+      type: ADC           # Type of the sensor
+      manufacturer: ADS   # Manufacturer of the sensor
+    configuration:
+      gain: 16            # Gain setting for the ADC
+      data_rate: 1600     # Data rate for the ADC in samples per second

@@ -1,4 +1,4 @@
-from device import SerialDevice
+from porter.windfreak.device import SerialDevice
 from collections.abc import Sequence
 
 import logging
@@ -582,7 +582,7 @@ class SynthHD(SerialDevice, Sequence):
         synth_id = None
         for i in range(N_attemps):
             logger.info(f"Attempt {i+1}/{N_attemps} to get synth ID...")
-            synth_id = self.get_id()
+            synth_id = self.get_id
             if synth_id is not None:
                 break
             time.sleep(0.1)
@@ -602,6 +602,7 @@ class SynthHD(SerialDevice, Sequence):
 
         logger.info(f"Enabling {len(config["channel"])} RF output channels")
 
+        am_enabled = False
         for i,ch in enumerate(config["channel"]):
             # set output frequency and power
             logger.info(f"Setting channel {ch} frequency to {config['freq'][i] / config['mult_factor'][i]} GHz and power to {config['power'][i]} dBm")
@@ -618,11 +619,17 @@ class SynthHD(SerialDevice, Sequence):
                     amd_f=config["mod_freq"][i],
                     amd_funct=config["mod_funct"][i]
                 )
-                self[ch].am_enable = True
+                am_enabled = True
                 
             else:
-                logger.info(f"Disabling synth amplitude modulation")
-                self[ch].am_enable = False
+                logger.info(f"Channel {ch}: AM disabled")
+
+        if am_enabled:
+            logger.info(f"Enabling AM")
+            self.am_enable = True
+        else:
+            logger.info("Disabling AM")
+            self.am_enable = False
 
     def save(self):
         """Save all settings to non-volatile EEPROM."""

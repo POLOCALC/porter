@@ -256,8 +256,8 @@ def main():
                 synt = valon.Valon(source["config"]["port"], source["config"]["baudrate"])
 
             elif source["name"]=="synthhd":
-                logger.info(f"Starting Valon synthesizer on port {source["config"]['port']} and baudrate {source["config"]['baudrate']}")
-                synt = SynthHD(source["config"]["devpath"])
+                logger.info(f"Starting SynthHD synthesizer on port {source["config"]["port"]}")
+                synt = SynthHD(source["config"]["port"])
 
             # check if the synthesizer responds to the ID command, retrying if necessary
             synt.check_status(params.ATTEMPTS)
