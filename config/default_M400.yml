@@ -206,11 +206,11 @@ pointing_controller:
 
   poi:
     name: POI                                           # Name of the point of interest
-    latitude: 45.61586326                               # Latitude of the point of interest
-    longitude: 9.16720607                               # Longitude of the point of interest
-    altitude: 237                                       # Altitude of the point of interest in meters
+    latitude: 45.5136599                                # Latitude of the point of interest
+    longitude: 9.2113794                                # Longitude of the point of interest
+    altitude: 170                                       # Altitude of the point of interest in meters
     max_distance: 1000.0                                # Maximum distance from the point of interest in meters
-
+    roll_deg: 30.0                                       # Roll angle in degrees
 # --- POSITION SOURCE --- #
 # Position source configuration for the Porter telemetry system.
 # Position is used to determine the location of the UAV and/or the payload.

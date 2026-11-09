@@ -292,7 +292,7 @@ def main():
                     t.start()
                     owned_threads.append(t)
                     logger.info(f"Thread started for camera {camera['name']}")
-                elif camera["name"] == 'Alvium':
+                elif camera["name"] in ('Alvium', 'Alvium_CSI'):
                     t = threads.AlviumCamera(
                         camera_config=camera,
                         flag=shutdown_flag,

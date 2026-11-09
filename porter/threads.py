@@ -36,6 +36,15 @@ except Exception as e:
     pass
 
 try:
+    import pyalvium_csi
+    logger.info("Alvium CSI Camera module imported successfully")
+except ModuleNotFoundError:
+    logger.info("Alvium CSI Camera module not found")
+except Exception as e:
+    logger.error(f"Error importing Alvium CSI Camera module: {e}")
+    pass
+
+try:
     from lager import PointingController as PC
     logger.info("Lager module imported successfully")
 except ModuleNotFoundError:
@@ -237,7 +246,8 @@ class AlviumCamera(threading.Thread):
         }
 
     def run(self):
-        with pyalvium.Camera(output_path=self.output, writing_threads=self.writing_threads, settings=self.settings, verbose=self.verbosity) as camera:
+        backend = pyalvium_csi if self.camera_name == "Alvium_CSI" else pyalvium
+        with backend.Camera(output_path=self.output, writing_threads=self.writing_threads, settings=self.settings, verbose=self.verbosity) as camera:
             camera.log_all_features()
             camera.start_acquisition()
 
@@ -246,10 +256,15 @@ class AlviumCamera(threading.Thread):
                 # read live frame count directly from the folder
                 frame_count = len([f for f in os.listdir(self.output) if f.endswith(".raw")])
                 self.status_board.beat(self.camera_name, {"frames_captured": frame_count})
+                # if v4l2-ctl died the camera stopped: stop the whole acquisition
+                if self.camera_name == "Alvium_CSI" and camera.proc.poll() is not None:
+                    logger.error("Alvium CSI stream stopped unexpectedly, shutting down")
+                    self.shutdown_flag.set()
 
             camera.stop_acquisition()
             logger.info(f"Closed sensor {self.name}")
             self.stats = camera.get_streaming_stats()
+
 
 class SonyCamera(threading.Thread):
     def __init__(

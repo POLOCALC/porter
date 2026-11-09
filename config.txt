@@ -77,3 +77,6 @@ usb_max_current_enable=1
 
 # set GPIO pin 17 to low at boot (power supply enebler for Gremsy gimbal)
 gpio=17=op,dl
+
+# set dtoverlay for CSI-2 Alvium
+dtoverlay=alvium-pi5

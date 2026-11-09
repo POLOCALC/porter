@@ -107,19 +107,20 @@ step "pip upgrade" "$PIP" install --upgrade pip
 echo ""
 echo "[3/5] Installing Python packages..."
 
-step "numpy"     "$PIP" install numpy==2.2.4
-step "scipy"     "$PIP" install scipy==1.15.3
-step "opencv"    "$PIP" install opencv-python-headless==4.10.0.84
-step "VmbPy"     "$PIP" install "$REPO_DIR/modules/vmbpy-1.2.1-py3-none-any.whl"
-step "Pyalvium"  "$PIP" install -e "$REPO_DIR/modules/Alvium-Camera-Module-Python"
-step "digi-xbee" "$PIP" install digi-xbee==1.5.0
-step "ina228"    "$PIP" install adafruit-circuitpython-ina228
-step "pyubx2"    "$PIP" install pyubx2
-step "mcp4725"   "$PIP" install adafruit-circuitpython-mcp4725
-step "pyusb"     "$PIP" install pyusb
-step "pyyaml"    "$PIP" install pyyaml
-step "lager"     "$PIP" install -e "$REPO_DIR/modules/lager"
-step "sourcore"  "$PIP" install -e "$REPO_DIR/modules/sour_core"
+step "numpy"         "$PIP" install numpy==2.2.4
+step "scipy"         "$PIP" install scipy==1.15.3
+step "opencv"        "$PIP" install opencv-python
+step "VmbPy"         "$PIP" install "$REPO_DIR/modules/vmbpy-1.2.1-py3-none-any.whl"
+step "Pyalvium"      "$PIP" install -e "$REPO_DIR/modules/Alvium-Camera-Module-Python"
+step "Pyalvium CSI"  "$PIP" install -e "$REPO_DIR/modules/Alvium-Camera-Module-CSI"
+step "digi-xbee"     "$PIP" install digi-xbee==1.5.0
+step "ina228"        "$PIP" install adafruit-circuitpython-ina228
+step "pyubx2"        "$PIP" install pyubx2
+step "mcp4725"       "$PIP" install adafruit-circuitpython-mcp4725
+step "pyusb"         "$PIP" install pyusb
+step "pyyaml"        "$PIP" install pyyaml
+step "lager"         "$PIP" install -e "$REPO_DIR/modules/lager"
+step "sourcore"      "$PIP" install -e "$REPO_DIR/modules/sour_core"
 
 # -------------------------------------------------------------
 # 4. SENSOR AND CAMERA BINARIES
@@ -132,6 +133,9 @@ echo "[4/5] Building binaries..."
 step_in "$REPO_DIR/modules/ADS1015-ADC-Module"       "ADS1015"                 ./build_for_pi.sh
 step_in "$REPO_DIR/modules/Inertial-Sensors-Module"  "Inertial-Sensors-Module" ./build_for_pi.sh
 step_in "$REPO_DIR/modules/LM76-Temperature-Sensor"  "LM76-Temperature-Sensor" ./build_for_pi.sh
+
+# Allied Vision Alvium CSI-2 driver (submodule of Alvium-Camera-Module-CSI)
+step_in "$REPO_DIR/modules/Alvium-Camera-Module-CSI/alvium-raspberrypi-driver-release" "Alvium CSI driver" "make && sudo make install"
 
 # IMX5 (prebuilt binary): symlink it into ~/.local/bin so it runs from anywhere
 imx5_link() {

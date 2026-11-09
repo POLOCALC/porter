@@ -27,7 +27,7 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=psdk-bridge
 # gimbal power (custom switch on GPIO 17): on after the 24 V request is accepted, off when the bridge stops
-ExecStartPost=+/home/polocalc/flight/porter/services/gimbal_power.sh
+ExecStartPost=+/bin/bash /home/polocalc/flight/porter/services/gimbal_power.sh
 ExecStopPost=+/usr/bin/pinctrl set 17 op dl
 TimeoutStartSec=150
 
