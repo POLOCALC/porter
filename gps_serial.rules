@@ -1,0 +1,1 @@
+KERNEL=="pps0", OWNER="root", GROUP="dialout", MODE="0660"

@@ -1,0 +1,24 @@
+[Unit]
+Description=Porter Power Controller Daemon
+Documentation=https://github.com/POLOCALC/porter
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+User=polocalc
+WorkingDirectory=/home/polocalc/flight/porter
+# Use the project venv so porter.* packages are importable
+ExecStart=/home/polocalc/porter_venv/bin/python3 /home/polocalc/flight/porter/power_monitor/powerd.py
+# Wait for the power controller module to configure
+ExecStartPre=/bin/sleep 5
+# Restart automatically if powerd crashes
+Restart=on-failure
+RestartSec=5s
+# Logs visible with: journalctl -u powerd -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=powerd
+
+[Install]
+WantedBy=multi-user.target

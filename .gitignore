@@ -4,6 +4,8 @@
 #File to avoid pushing
 *.pyc
 *.pck
-*.log
-*.bin
-
+.*
+plot_venv/
+venv/
+requirements.txt
+data/

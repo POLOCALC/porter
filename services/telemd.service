@@ -1,0 +1,25 @@
+[Unit]
+Description=Porter XBee Radio Daemon
+Documentation=https://github.com/POLOCALC/porter
+# Bound to the XBee (/dev/xbee, from 99-xbee.rules): starts when the radio appears, also at boot,
+# and stops when it is unplugged. No XBee, no telemd, and no restart loop.
+BindsTo=dev-xbee.device
+After=dev-xbee.device
+
+[Service]
+Type=simple
+User=polocalc
+WorkingDirectory=/home/polocalc/flight/porter
+# Use the project venv so porter.* packages are importable
+ExecStart=/home/polocalc/porter_venv/bin/python3 /home/polocalc/flight/porter/telemetry/telemd.py
+# Restart automatically if telemd crashes
+Restart=on-failure
+RestartSec=5s
+# Logs visible with: journalctl -u telemd -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telemd
+
+[Install]
+# 'systemctl enable telemd' links it to the device, 'systemctl disable telemd' keeps it off even with the XBee in
+WantedBy=dev-xbee.device

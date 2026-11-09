@@ -1,3 +1,15 @@
+V4.2.1  - New systemctl service to handle DJI matrice 400 PSDK telemetry
+V4.2    - Porter now supports DJI Matrice 400 drone
+        - Bug fixed
+V4.1    - Several bug fixed
+        - Tested Valon and other RF-related components
+        - New thermal control handling for the frequency multiplier
+        - DiskGuard thread for safe acquisition stop when disk is full
+V4.0    - Raspberry Pi 5 version of porter
+        - Alvium camera is handled by a python module with multithread memory writing
+        - XBee modules are used for line of sight telemetry/control
+        - Integrated lager module for gimbal control and drone live telemetry access
+        - Point of interest autonomous tracking using payload gnss or drone drtk
 V3.1	- New UBlox configuration Method
 	- Different handling of the sensors and configuration
 V3.0.2: - Added option that delete the data folder and stops the code when camera is not found at startup

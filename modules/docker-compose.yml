@@ -1,0 +1,16 @@
+services:
+  module-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: porter-module-builder
+    volumes:
+      - ./ADS1015-ADC-Module:/workspace/ADS1015-ADC-Module
+      - ./Alvium-Camera-Module:/workspace/Alvium-Camera-Module
+      - ./IMX-5-Sensor-Module:/workspace/IMX-5-Sensor-Module
+      - ./Inertial-Sensors-Module:/workspace/Inertial-Sensors-Module
+      - ./LM76-Temperature-Sensor:/workspace/LM76-Temperature-Sensor
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: /bin/bash

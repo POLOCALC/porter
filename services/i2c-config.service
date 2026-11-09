@@ -1,0 +1,11 @@
+[Unit]
+Description=I2C Performance Fix
+After=multi-user.target
+Before=zkbootrtc.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/i2c_startup_config.sh
+
+[Install]
+WantedBy=multi-user.target

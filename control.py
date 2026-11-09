@@ -1,248 +1,421 @@
 import datetime
 import logging
 import os
-import queue
 import signal
 import sys
 import threading
 import time
-
 import yaml
+import argparse
+import shutil
 
+from exceptions import ServiceExitError, FlagSetError, DiskSpaceError
+import parameters as params
+
+from telemetry.command_server import CommandServer
+from porter.process_utils import stop_all
+
+# define timestamp for data saving
+timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# create paths
+path = os.path.dirname(os.path.realpath(__file__))
+data_directory = os.path.join(params.home_directory, params.data_folder_name)
+
+os.makedirs(data_directory, exist_ok=True)
+indices = []
+for folder in os.listdir(data_directory):
+    parts = folder.split("_")
+    if len(parts) == 3 and parts[0].isdigit():
+        try:
+            datetime.datetime.strptime(parts[1] + "_" + parts[2], "%Y%m%d_%H%M%S")
+            indices.append(int(parts[0]))
+        except ValueError:
+            pass
+suffix = max(indices, default=0) + 1  # first run is 001
+if params.INCREMENTAL_FILE_PREFIX:
+    working_data_directory = os.path.join(data_directory, f"{suffix:03d}_{timestamp}")
+else:
+    working_data_directory = os.path.join(data_directory, timestamp)
+
+logfile_path = os.path.join(working_data_directory, params.logfile_name)
+current_symlink_path = os.path.join(data_directory, params.current_symlink_name)
+
+
+# create directories if they do not exist
+if not os.path.exists(data_directory):
+    os.mkdir(data_directory)
+if not os.path.exists(working_data_directory):
+    os.mkdir(working_data_directory)
+
+# set up logging
+logging.basicConfig(
+    format=params.LOGGING_FORMAT_FILE,
+    datefmt=params.LOGGING_DATE_FORMAT,
+    level=params.LOGGING_LEVEL,
+    handlers=[
+        logging.FileHandler(logfile_path),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+# remove existing symlink and create a new one to the current data directory
+if os.path.islink(current_symlink_path):
+    os.remove(current_symlink_path)
+    logger.info(f"Removed existing symlink {current_symlink_path}")
+os.symlink(working_data_directory, current_symlink_path)
+logger.info(f"Created symlink {current_symlink_path} -> {working_data_directory}")
+
+
+# import modules that use the logger
 import porter.sensors.sensors_handler as sh
 import porter.threads as threads
 import porter.valon as valon
-
-path = os.path.dirname(os.path.realpath(__file__))
-home_dir = os.environ["HOME"]
-
-date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-if not os.path.exists(home_dir + "/data"):
-    os.mkdir(home_dir + "/data")
-if not os.path.exists(path + "/data/" + date):
-    os.mkdir(home_dir + "/data/" + date)
-
-logging.basicConfig(
-    filename=home_dir + "/data/" + date + "/file.log",
-    filemode="w",
-    format="%(asctime)s.%(msecs)03d  [%(threadName)s]  %(levelname)s:%(message)s",
-    datefmt="%Y/%m/%d %H:%M:%S",
-    level=logging.DEBUG,
-)
-
-logger = logging.getLogger("mainlogger")
-
-try:
-    from sour_core import sony
-except ModuleNotFoundError:
-    pass
-
-"""
-Classes and Function to deal with interrupting the code
-"""
+from telemetry.StatusBoard import StatusBoard
+from porter.windfreak.synth_hd import SynthHD
 
 
-class ServiceExitError(Exception):
-    """
-    Custom exception which is used to trigger the clean exit
-    of all running threads and the main program.
-    """
-
-    pass
-
-
-class FlagSetError(Exception):
-
-    pass
+# initialize the status board
+status_board = StatusBoard()
 
 
 def handler(signum, frame):
-    print("Signal Sent")
-    logger.info(f"Caught signal {signal.strsignal(signum)}")
+    logger.error(f"Caught signal {signal.strsignal(signum)}")
     raise ServiceExitError
 
 
 def capture_flag(flag):
-    logger.info(f"Flag has been set in a Thread")
     if flag.is_set():
+        logger.error(f"Flag has been set in a Thread")
         raise FlagSetError
 
-
-signal_to_catch = [
-    signal.SIGINT,
-    signal.SIGTERM,
-]
+# arg parser for command line arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("-c", "--config_file", type=str, help="Path to the config file", default="config/default.yml")
 
 
 def main():
-    cfg_name = sys.argv[1]
+    logger.info("Starting main program...")
+    args = parser.parse_args()
+    config_file = args.config_file
 
-    flag = threading.Event()
+    # global flags
+    shutdown_flag = threading.Event()
+    autostart_camera_flag = True
+    autostart_poi_tracking_flag = True
 
-    cfg_path = path + "/" + cfg_name
+    # exit code to return to the shell
+    exit_code = 0
 
-    status = True
+     # track only threads we start ourselves
+    owned_threads = [] 
 
-    with open(cfg_path, "r") as cfg:
+    # opening config file
+    config_path = os.path.join(path, config_file)
+    with open(config_path, "r") as cfg:
         config = yaml.safe_load(cfg)
-        logging.info(f"Loaded configuration {cfg_name}")
+        logger.info(f"Loaded configuration {config_file}")
+    
+    # saving a copy of the config file in the data directory
+    config_path_copy = os.path.join(working_data_directory, os.path.basename(config_file))
+    with open(config_path_copy, "w") as cfg:
+        yaml.dump(config, cfg)
+        logger.info(f"Saved configuration {config_file} copy to {config_path_copy}")
 
-    if not os.path.exists(home_dir + "/data/" + date + "/sensors_data"):
-        os.mkdir(home_dir + "/data/" + date + "/sensors_data")
-        sensor_path = home_dir + "/data/" + date + "/sensors_data/"
+    # define paths for sensors and camera data
+    sensor_path = os.path.join(working_data_directory, params.sensors_folder_name)
+    camera_path = os.path.join(working_data_directory, params.camera_folder_name)
+    if not os.path.exists(sensor_path):
+        os.mkdir(sensor_path)
+    if not os.path.exists(camera_path):
+        os.mkdir(camera_path)
 
-    for sig in signal_to_catch:
-        signal.signal(sig, handler)
+    # keep catching signals during shutdown: with SIG_DFL a second SIGINT/SIGTERM
+    # would kill python immediately, skipping close() and atexit, and orphan the binaries
+    def _during_shutdown(signum, frame):
+        logger.warning(f"Caught {signal.strsignal(signum)} during shutdown, already stopping")
 
-    time.sleep(1)
+    disk_guard = None
 
     try:
-        if "sensors" in config.keys():
-            sensor_locks = {}
+        # set up signal handlers
+        for sig in params.signal_to_catch:
+            signal.signal(sig, handler)
+        time.sleep(1)
+
+        global_config = config.get("global", {})
+        sensors = config.get("sensors", None)
+        source = config.get("source", None)
+        camera = config.get("camera", None)
+        pointing_controller = config.get("pointing_controller", None)
+
+        # check for global configuration autostart parameters
+        if global_config:
+            logger.info(f"Found global configuration parameters")
+            autostart_camera_flag       = global_config.get("autostart_camera",       True)
+            autostart_poi_tracking_flag = global_config.get("autostart_poi_tracking", True)
+            if autostart_camera_flag:
+                logger.info(f"Global config: autostart_camera is enabled")
+            else:
+                logger.info(f"Global config: autostart_camera is disabled")
+            if autostart_poi_tracking_flag:
+                logger.info(f"Global config: autostart_poi_tracking is enabled")
+            else:
+                logger.info(f"Global config: autostart_poi_tracking is disabled")
+
+        # start the StatusWriter thread
+        # (telemd.py owns the XBee and reads the file written here)
+        cmd_server = None
+        t = threads.StatusWriter(
+            status_board=status_board,
+            update_rate=params.STATUS_WRITER_UPDATE_RATE,
+            flag=shutdown_flag,
+            daemon=False,
+        )
+        t.start()
+        owned_threads.append(t)
+        logger.info(f"StatusWriter started at {params.STATUS_WRITER_UPDATE_RATE} Hz")
+
+        # start the DiskGuard thread
+        disk_cfg = global_config.get("disk_guard", {}) if global_config else {}
+        start_min = float(disk_cfg.get("start_min_free_gb", 0.3)) * 1024**3
+        for p in (sensor_path, camera_path):
+            free = shutil.disk_usage(p).free
+            if free < start_min:
+                raise DiskSpaceError(f"only {free/1024**3:.1f} GB free on {p}, "
+                                     f"need {start_min/1024**3:.1f} GB to start")
+
+        disk_guard = threads.DiskGuard(
+            paths=[sensor_path, camera_path],
+            status_board=status_board,
+            shutdown_flag=shutdown_flag,
+            config=disk_cfg,
+            daemon=False,
+        )
+        disk_guard.start()
+        owned_threads.append(disk_guard)
+
+        # start command server thread for handling commands from remote telemetry clients
+        cmd_server = CommandServer(shutdown_flag=shutdown_flag)
+
+        # start sensor threads if sensors are configured
+        if sensors is not None:
+            logger.info(f"Found sensor key in config")
+
+            logger.info("Starting sensor threads...")
             sensor_names = {}
             sensor_handler = {}
+            sensor_threads = {}
 
-            for i in config["sensors"].keys():
-                logging.info(f'Sensor {i}')
-                sensors_handler = sh.Handler(
-                    config["sensors"][i], local=config["local_development"]
-                )
+            for i in sensors.keys():
+                logger.info(f"Initializing sensor {i}")
+                sensors_handler = sh.Handler(sensors[i])
 
-                name = config["sensors"][i]["name"]
-                
+                name = sensors[i]["name"]
                 sensor_handler[name] = sensors_handler
-                sensor_locks[name] = threading.Lock()
                 sensor_names[name] = name
 
             for i in sensor_handler.keys():
-                logging.info(f'Sensor {i} - {sensor_handler[i]}')
-                threads.Sensors(
+                logger.info(f"Starting thread for sensor {i}")
+                t = threads.Sensors(
                     handler=sensor_handler[i],
-                    sensor_lock=sensor_locks[i],
-                    flag=flag,
-                    date=date,
+                    flag=shutdown_flag,
+                    date=timestamp,
                     path=sensor_path,
                     sensor_name=sensor_names[i],
+                    status_board=status_board,
                     daemon=False,
-                ).start()
+                )
+                t.start()
+                owned_threads.append(t)
+                sensor_threads[i] = t
+                logger.info(f"Thread started for sensor {i}")
 
-        if "source" in config.keys():
-            synt = valon.Valon(config["source"]["port"], config["source"]["baudrate"])
+        # get the onboard gnss source if configured
+        gnss_source = None
+        if sensors is not None:
+            for i in sensors.keys():
+                if i.lower().startswith("gps"):
+                    name = sensors[i]["name"]
+                    gps_thread = sensor_threads.get(name)
+                    if gps_thread is not None and gps_thread.ready.wait(timeout=params.SENSOR_INIT_TIMEOUT) and hasattr(gps_thread.handler, "obj"):
+                        gnss_source = gps_thread.handler.obj.get_gnss_source()
+                        logger.info(f"GNSS source initialized from GPS sensor")
+                    else:
+                        logger.error(f"GPS sensor {name} did not initialize in time, no GNSS source available")
+                    break
 
-            synt.set_freq(config["source"]["freq"] / config["source"]["mult_factor"])
-            synt.set_pwr(config["source"]["power"])
-            if config["source"]["mod_freq"] > 0:
-                synt.set_amd(config["source"]["mod_amp"], config["source"]["mod_freq"])
-            else:
-                synt.set_amd(0, 0)
+        # start synthesizer if source is configured
+        if source is not None:
+            logger.info(f"Found source key in config")
+
+            if source["name"].lower()=="valon":
+                logger.info(f"Starting Valon synthesizer on port {source['config']['port']} and baudrate {source['config']['baudrate']}")
+                synt = valon.Valon(source["config"]["port"], source["config"]["baudrate"])
+
+            elif source["name"].lower()=="synthhd":
+                logger.info(f"Starting SynthHD synthesizer on port {source['config']['port']}")
+                synt = SynthHD(source['config']['port'])
+            # check if the synthesizer responds to the ID command, retrying if necessary
+            synt.check_status(params.ATTEMPTS)
+            
+            # configure the emission of the frequency synthesizer
+            synt.configure(source["config"])
+
             time.sleep(2)
 
-        if "camera" in config.keys() and not config["local_development"]:
-
+        # start camera thread if camera is configured
+        if camera is not None:
+            logger.info(f"Found camera key in config")
             try:
-                camera = sony.SONYconn(config["camera"]["name"])
-
-                camera.initialize_camera()
-
-                time.sleep(0.2)
-
-                camera.messageHandler(["datetime", 0.04, 1e-3])
-
-                time.sleep(0.1)
-
-                camera.messageHandler(["programmode", config["camera"]["program"]])
-
-                time.sleep(0.1)
-
-                if "ISO" in config["camera"].keys():
-                    camera.messageHandler(["iso", config["camera"]["ISO"]])
-                    time.sleep(0.1)
-
-                if "shutter_speed" in config["camera"].keys():
-                    camera.messageHandler(
-                        ["shutterspeed", config["camera"]["shutter_speed"]]
+                if camera["name"] == 'Alvium_Starspec':
+                    t = threads.AlviumCameraStarspec(
+                        camera_config=camera,
+                        flag=shutdown_flag,
+                        path=camera_path,
+                        status_board=status_board,
+                        daemon=False,
                     )
-                    time.sleep(0.1)
-
-                if "focus_distance" in config["camera"].keys():
-                    camera.messageHandler(
-                        ["focusdistance", config["camera"]["focus_distance"]]
+                    t.start()
+                    owned_threads.append(t)
+                    logger.info(f"Thread started for camera {camera['name']}")
+                elif camera["name"] in ('Alvium', 'Alvium_CSI'):
+                    t = threads.AlviumCamera(
+                        camera_config=camera,
+                        flag=shutdown_flag,
+                        path=camera_path,
+                        status_board=status_board,
+                        daemon=False,
                     )
-                    time.sleep(0.1)
-
-                if config["camera"]["mode"] == "photo":
-                    duration = None
-
-                    if "fps" in config["camera"].keys():
-                        fps = config["camera"]["fps"]
-                    else:
-                        fps = 1
-
-                    if "frames" in config["camera"].keys():
-                        frames = config["camera"]["frames"]
-                    else:
-                        frames = None
-
+                    cmd_server.register("camera.start", lambda cam=t: cam.start() if cam.ident is None else None)
+                    if autostart_camera_flag:
+                        t.start()
+                    owned_threads.append(t)
+                    logger.info(f"Thread started for camera {camera['name']}")
+                elif camera["name"] == 'Sony':
+                    t = threads.SonyCamera(
+                        camera_config=camera,
+                        flag=shutdown_flag,
+                        daemon=True,
+                    )
+                    t.start()
+                    owned_threads.append(t)
+                    logger.info(f"Thread started for camera {camera['name']}")
                 else:
-                    if "duration" in config["camera"].keys():
-                        duration = config["camera"]["duration"]
-                    else:
-                        duration = None
-
-                    fps = None
-                    frames = None
-
-                threads.Camera(
-                    camera=camera,
-                    flag=flag,
-                    mode=config["camera"]["mode"],
-                    camera_name=config["camera"]["name"],
-                    fps=fps,
-                    frames=frames,
-                    duration=duration,
-                    daemon=True,
-                ).start()
+                    logger.error(f"Unknown camera name: {camera['name']}")
+                    shutdown_flag.set()
 
                 time.sleep(2)
 
             except IndexError:
-                status = False
-                flag.set()
-                logger.info("Camera not Found, deleting data folder")
-                logger.info("This command is sent so that when the code")
-                logger.info("run at startup, we do not fill the data directory")
+                shutdown_flag.set()
 
-                original_log_name = home_dir + "/data/" + date + "/file.log"
+        # start pointing controller threads and pass configuration file
+        if pointing_controller is not None:
+            logger.info(f"Found pointing controller key in config")
+            if pointing_controller["name"] == 'lager':
+                t = threads.PointingController(
+                    pointing_controller_config=pointing_controller,
+                    path=working_data_directory,
+                    flag=shutdown_flag,
+                    status_board=status_board,
+                    gnss_source=gnss_source,
+                    position_config=config.get("position_source"),
+                    daemon=False,
+                )
+                t.start()
+                logger.info(f"Registering POI tracking commands for pointing controller {pointing_controller['name']} with command server...")
+                cmd_server.register("gimbal.starttrack", t.start_tracking)
+                cmd_server.register("gimbal.stoptrack", t.stop_tracking)
+                
+                GIMBAL_MODES = ("off", "lock", "follow", "mapping", "reset")
+                mode_lock = threading.Lock()
+                def _gimbal_mode(mode, pc_thread=t):
+                    if pc_thread.pc is None or pc_thread.gimbal_link != "connected":
+                        raise RuntimeError(f"gimbal not connected ({pc_thread.gimbal_link})")
 
-                new_log_name = home_dir + "/data/file_" + date + ".log"
-                time.sleep(1)
-                os.popen(f"cp {original_log_name} {new_log_name}")
-                time.sleep(2)
+                    mode = str(mode).lower()
+                    if mode not in GIMBAL_MODES:
+                        raise ValueError(f"mode must be one of {GIMBAL_MODES}, got '{mode}'")
+                    if not mode_lock.acquire(blocking=False):
+                        raise RuntimeError("a gimbal mode change is already in progress")
+                    def _run():
+                        try:
+                            pc_thread.pc.gimbal.set_mode(mode)   # may block up to about 30 s
+                        except Exception:
+                            logger.exception(f"gimbal.mode {mode} failed")
+                        finally:
+                            mode_lock.release()
+                    threading.Thread(target=_run, name="gimbal-mode", daemon=True).start()
+                    return {"detail": f"switching to {mode}"}
+                cmd_server.register("gimbal.mode", _gimbal_mode)
 
-                import shutil
 
-                shutil.rmtree(home_dir + "/data/" + date)
+                if autostart_poi_tracking_flag:
+                    t.start_tracking()
+                owned_threads.append(t)
+                logger.info(f"Thread started for pointing controller {pointing_controller['name']}")
 
-        while status:
-            pass
+                # gimbal.goto: refuses while the gimbal isn't connected, so it can be registered at once
+                def _gimbal_goto(yaw, pitch, roll, pc_thread=t):
+                    if pc_thread.gimbal_link != "connected":
+                        raise RuntimeError(f"gimbal not connected ({pc_thread.gimbal_link})")
+                    pc_thread.pc.gimbal.goto(yaw=yaw, pitch=pitch, roll=roll)
+                    return {"detail": f"yaw={yaw} pitch={pitch} roll={roll}"}
+                cmd_server.register("gimbal.goto", _gimbal_goto)
 
-        capture_flag(flag)
+
+        # start command server thread for handling commands from remote telemetry clients
+        if cmd_server is not None:
+            cmd_server.start()
+
+        while not shutdown_flag.is_set():
+            time.sleep(0.2)
 
     except (ServiceExitError, FlagSetError) as err:
-        logger.info(f"Flag has been raise")
-        if flag.is_set():
-            logger.info(f"CASE 1")
-            if "camera" in config.keys() and not config["local_development"]:
-                try:
-                    camera.close_usb_connection()
-                except UnboundLocalError:
-                    pass
+        logger.error(f"Exception occurred: {err.__class__.__name__}")
+    except DiskSpaceError as e:
+        logger.critical(f"Not starting: {e}")
+        exit_code = 2
+    except Exception as e:
+        logger.exception(f"Unhandled exception occurred, shutting down: {e.__class__.__name__}: {e}")
+        exit_code = 1
+    finally:
+        for sig in params.signal_to_catch:
+            signal.signal(sig, _during_shutdown)
+        shutdown_flag.set()
+
+    logger.info("Waiting for threads to finish...")
+    # one deadline for all threads, not a timeout per thread
+    deadline = time.monotonic() + params.SHUTDOWN_TIMEOUT
+    for thread in owned_threads:
+        if not thread.is_alive():
+            logger.info(f"Thread {thread.name} already finished.")
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(f"Shutdown deadline reached, not waiting for thread {thread.name}.")
+            continue
+        logger.info(f"Joining thread {thread.name}...")
+        thread.join(timeout=remaining)
+        if thread.is_alive():
+            logger.warning(f"Thread {thread.name} did not finish in time and is still alive.")
         else:
-            flag.set()
-            logger.info(f"CASE 2")
-            if "camera" in config.keys() and not config["local_development"]:
-                camera.close_usb_connection()
+            logger.info(f"Thread {thread.name} has finished.")
+
+    if disk_guard is not None and disk_guard.triggered.is_set():
+        logger.critical("Acquisition stopped by DiskGuard: disk almost full")
+        exit_code = 2
+
+    # stop any sensor binary that its thread did not close (dead thread, join timeout, ...)
+    stop_all()
+    logger.info("Shutdown complete.")
+    logging.shutdown()
+    if any(t.is_alive() for t in owned_threads):
+        os._exit(exit_code)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

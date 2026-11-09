@@ -1,0 +1,10 @@
+# Devices gpsd should collect to at boot time.
+# They need to be read/writeable, either by user gpsd or the group dialout.
+START_DAEMON="TRUE"
+DEVICES="/dev/ttyAMA2"
+# -D 4 is for debugging mode, not usefule for ral flights
+GPSD_OPTIONS="-n -b -s 38400"
+GPSD_SOCKET="/var/run/gpsd.sock"
+
+# Automatically hot add/remove USB GPS devices via gpsdctl
+USBAUTO="FALSE"

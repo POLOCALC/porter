@@ -1,194 +1,82 @@
 import logging
-import random
-import struct
+import os
+import subprocess
+import signal
 import time
 
-import lgpio
-
-# ADS1015 registers
-ADS1015_REG_CONVERSION = 0x00
-ADS1015_REG_CONFIG = 0x01
-
-ADS1015_REG_CONFIG_CQUE_NONE = 0x0003
-ADS1015_REG_CONFIG_CLAT_NONLAT = 0x0000
-ADS1015_REG_CONFIG_CPOL_ACTVLOW = 0x0000
-ADS1015_REG_CONFIG_CMODE_TRAD = 0x0000
-ADS1015_REG_CONFIG_OS_SINGLE = 0x8000
-
-# ADS1015 config register fields
-ADS1015_CONFIG_MUX = {
-    "SINGLE_0": 0x4000,
-    "SINGLE_1": 0x5000,
-    "SINGLE_2": 0x6000,
-    "SINGLE_3": 0x7000,
-    "DIFF_0_1": 0x0000,
-    "DIFF_0_3": 0x1000,
-    "DIFF_1_3": 0x2000,
-    "DIFF_2_3": 0x3000,
-}
-
-ADS1015_CONFIG_GAIN = {
-    "2/3": 0x0000,
-    "1": 0x0200,
-    "2": 0x0400,
-    "4": 0x0600,
-    "8": 0x0800,
-    "16": 0x0A00,
-}
+from porter.process_utils import start_process, stop_process
 
 ADS1015_VALUE_GAIN = {
-    "2/3": 6.144,
-    "1": 4.096,
-    "2": 2.048,
-    "4": 1.024,
-    "8": 0.512,
-    "16": 0.256,
+    1: 4.096,
+    2: 2.048,
+    4: 1.024,
+    8: 0.512,
+    16: 0.256,
 }
 
-ADS1015_CONFIG_MODE = {"Continuous": 0x0000, "Single-Shot": 0x0100}
+logger = logging.getLogger(__name__)
 
-ADS1015_CONFIG_RATE = {
-    "128": 0x0000,
-    "250": 0x0020,
-    "490": 0x0040,
-    "920": 0x0060,
-    "1600": 0x0080,
-    "2400": 0x00A0,
-    "3300": 0x00C0,
-}
-
-logger = logging.getLogger()
-
+# get the absolute path to this file's directory
+current_dir = os.path.dirname(os.path.abspath(__file__))
 
 class ADS1015:
 
-    def __init__(self, channel, bus=1, address=0x48, **kwargs):
-
-        self.name = kwargs.get("name", "Generic ADC")
-
-        self.model = kwargs.get("model", "ADS1015")
-
-        self.address = address
-
-        self._gain = ADS1015_CONFIG_GAIN["8"]
-        self._gain_value = ADS1015_VALUE_GAIN["8"]
-        self._rate = ADS1015_CONFIG_RATE["1600"]
-
-        self.__read_mode = kwargs.get("read mode", ADS1015_CONFIG_MODE["Continuous"])
-
-        mode = kwargs.get("mode", "differential")
-
-        if mode.lower() == "differential":
-            string = "DIFF_" + str(int(channel[0])) + "_" + str(int(channel[1]))
-        else:
-            string = "SINGLE_" + str(int(channel))
-
-        self.__mux_channels = ADS1015_CONFIG_MUX[string]
-
-        self.bus = lgpio.i2c_open(bus, address)
-
-        self.__adc_sample = 1 / 1600.0
-        self.__time_sample = 1 / 1600.0
-
-        self.__config_register = (
-            ADS1015_REG_CONFIG_CQUE_NONE
-            | ADS1015_REG_CONFIG_CLAT_NONLAT
-            | ADS1015_REG_CONFIG_CPOL_ACTVLOW
-            | ADS1015_REG_CONFIG_CMODE_TRAD
-            | self.__read_mode
-            | self._rate
-            | self._gain
-            | self.__mux_channels
-            | ADS1015_REG_CONFIG_OS_SINGLE
-        )
-
-        self.__read_buffer = bytearray(2)
-
+    def __init__(self, name="Generic ADC", bus=6, model="ADS1015", sensor_core=None):
+        self.name = name 
+        self.model = model 
+        self.core = sensor_core
+        self.bus = int(bus)
+        self.gain = None
+        self.rate = None
+        self.gain_value = None
+        self.process = None
         logger.info(f"Connected to ADC {self.name}")
-        logger.info(f"Current ADC Data Rate in s: {self.__adc_sample}")
-        logger.info(f"Current Reading Data Rate in s: {self.__time_sample}")
-        logger.info(f"Current Gain: {self._gain_value}")
 
-    def read_continous_binary(self, fs, flag, sensor_lock):
+    def read_continous_binary(self, shutdown_flag, datafile_name, status_board):
+        # start the ads1015 process through the command line
+        cmd = f"ads1015 --gain {self.gain} --rate {self.rate} --output {datafile_name} --i2c-bus {self.bus}"
+        if self.core is not None:
+            cmd += f" --core {int(self.core)}"
 
-        config_bytes = [
-            (self.__config_register >> 8) & 0xFF,
-            self.__config_register & 0xFF,
-        ]
-        lgpio.i2c_write_i2c_block_data(self.bus, ADS1015_REG_CONFIG, config_bytes)
+        # send the binary output to a log file next to the data file instead of an
+        # unread pipe, so it can't block on a full pipe and its errors are kept
+        log_path = os.path.splitext(datafile_name)[0] + "_stdout.log"
+        with open(log_path, "ab") as log:
+            self.process = start_process(cmd, stdout=log, stderr=subprocess.STDOUT)
+        launch_time = time.monotonic()
 
-        msg_buffer = bytearray(20)
+        # loop until told to close
+        while not shutdown_flag.is_set():
+            shutdown_flag.wait(1)
+            # check if the process exited on its own
+            if self.process is not None and self.process.poll() is not None:
+                logger.error(f"{self.name} process exited unexpectedly (exit code {self.process.returncode})")
+                break
+            # after startup grace period, verify data is still flowing to the output file
+            if time.monotonic() - launch_time > 10.0:
+                try:
+                    if time.time() - os.path.getmtime(datafile_name) > 5.0:
+                        logger.error(f"{self.name}: no new data written for >5s, sensor may be disconnected")
+                        break
+                except OSError:
+                    logger.error(f"{self.name}: no output file after startup grace period, sensor not writing")
+                    break
 
-        next_sample_time = time.perf_counter()
-
-        while not flag.is_set():
-            sensor_lock.acquire()
-            t_start = time.perf_counter_ns()
-
-            _, raw_value = lgpio.i2c_read_i2c_block_data(
-                self.bus, ADS1015_REG_CONVERSION, 2
-            )
-            
-            read_time = time.perf_counter_ns() - t_start
-            
-            next_sample_time = next_sample_time + self.__time_sample * (
-                1 + int(read_time / 1e9 / self.__time_sample)
-            )
-
-            raw_value = ((raw_value[0] << 8) | raw_value[1]) >> 4
-            if raw_value > 2047:
-                raw_value -= 4096
-            
-            struct.pack_into("<d", msg_buffer, 0, time.time())
-            struct.pack_into("<q", msg_buffer, 8, read_time)
-            struct.pack_into("<f", msg_buffer, 16, (raw_value * self._gain) / 4096.)
-
-            fs.write(msg_buffer)
-            sensor_lock.release()
-            while time.perf_counter() < next_sample_time:
-                pass
+            status_board.beat(self.name)
 
         self.close()
 
     def configure(self, config):
+        self.gain = config.get("gain", 8)
+        self.rate = config.get("data_rate", 1600)
+        self.gain_value = ADS1015_VALUE_GAIN[self.gain] 
 
-        keys = ["gain", "ADC_rate", "reading_rate"]
-
-        for i in config.keys():
-
-            if i.lower() == "gain":
-                self._gain = ADS1015_CONFIG_GAIN[str(config[i])]
-                self._gain_value = ADS1015_VALUE_GAIN[str(config[i])]
-
-                logger.info(f"Current Gain: {self._gain_value}")
-            elif i.lower() == "adc_rate":
-                self._rate = ADS1015_CONFIG_RATE[str(config[i])]
-                self.__adc_sample = 1 / config[i]
-
-                logger.info(f"Current ADC Data Rate in s: {self.__adc_sample}")
-
-            elif i.lower() == "reading_rate":
-                self.__time_sample = 1 / config[i]
-
-                if self.__time_sample < self.__adc_sample:
-                    self.__time_sample = self.__adc_sample * 1.5
-                    logger.info(f"Set Reading Data Rate in s: {self.__time_sample}")
-                else:
-                    logger.info(f"Current Reading Data Rate in s: {self.__time_sample}")
-
-        self.__config_register = (
-            ADS1015_REG_CONFIG_CQUE_NONE
-            | ADS1015_REG_CONFIG_CLAT_NONLAT
-            | ADS1015_REG_CONFIG_CPOL_ACTVLOW
-            | ADS1015_REG_CONFIG_CMODE_TRAD
-            | self.__read_mode
-        )
-
-        self.__config_register |= self._rate
-        self.__config_register |= self._gain
-        self.__config_register |= self.__mux_channels
-        self.__config_register |= ADS1015_REG_CONFIG_OS_SINGLE
+        logger.info(f"Configured {self.name}")
+        logger.info(f"Current ADC Data Rate: {self.rate} Hz")
+        logger.info(f"Current Gain Setting {self.gain}: {self.gain_value}")
 
     def close(self):
-
-        logging.info(f"Closed sensor {self.name}")
+        # stop the process: SIGTERM, wait up to 3 s, then SIGKILL
+        stop_process(self.process, self.name)
+        self.process = None
+        logger.info(f"Closed sensor {self.name}")

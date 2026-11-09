@@ -1,7 +1,0 @@
-local_development: False
-
-camera:
-  name: Sony
-  mode: photo
-  program: Photo_Auto
-  focus_distance: infinity

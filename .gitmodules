@@ -1,0 +1,28 @@
+[submodule "modules/IMX-5-Sensor-Module"]
+	path = modules/IMX-5-Sensor-Module
+	url = git@github.com:POLOCALC/IMX-5-Sensor-Module.git
+[submodule "modules/LM76-Temperature-Sensor"]
+	path = modules/LM76-Temperature-Sensor
+	url = git@github.com:POLOCALC/LM76-Temperature-Sensor.git
+[submodule "modules/ADS1015-ADC-Module"]
+	path = modules/ADS1015-ADC-Module
+	url = git@github.com:POLOCALC/ADS1015-ADC-Module.git
+[submodule "modules/Inertial-Sensors-Module"]
+	path = modules/Inertial-Sensors-Module
+	url = git@github.com:POLOCALC/Inertial-Sensors-Module.git
+[submodule "modules/Alvium-Camera-Module"]
+	path = modules/Alvium-Camera-Module
+	url = git@github.com:POLOCALC/Alvium-Camera-Module.git
+[submodule "modules/Alvium-Camera-Module-Python"]
+	path = modules/Alvium-Camera-Module-Python
+	url = https://github.com/federico-cacciotti/Alvium-Camera-Module-Python
+[submodule "modules/sour_core"]
+	path = modules/sour_core
+	url = https://github.com/protocalc/sour_core
+[submodule "modules/lager"]
+	path = modules/lager
+	url = https://github.com/POLOCALC/lager
+	branch = main
+[submodule "modules/Alvium-Camera-Module-CSI"]
+	path = modules/Alvium-Camera-Module-CSI
+	url = git@github.com:POLOCALC/Alvium-Camera-Module-CSI.git
