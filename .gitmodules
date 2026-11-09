@@ -23,3 +23,6 @@
 	path = modules/lager
 	url = https://github.com/POLOCALC/lager
 	branch = observe_POI_w_roll
+[submodule "modules/Alvium-Camera-Module-CSI"]
+	path = modules/Alvium-Camera-Module-CSI
+	url = git@github.com:POLOCALC/Alvium-Camera-Module-CSI.git
