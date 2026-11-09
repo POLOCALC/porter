@@ -251,11 +251,11 @@ def main():
         if source is not None:
             logger.info(f"Found source key in config")
 
-            if source["name"]=="valon":
+            if source["name"].lower()=="valon":
                 logger.info(f"Starting Valon synthesizer on port {source['config']['port']} and baudrate {source['config']['baudrate']}")
                 synt = valon.Valon(source["config"]["port"], source["config"]["baudrate"])
 
-            elif source["name"]=="synthhd":
+            elif source["name"].lower()=="synthhd":
                 logger.info(f"Starting SynthHD synthesizer on port {source['config']['port']}")
                 synt = SynthHD(source['config']['port'])
             # check if the synthesizer responds to the ID command, retrying if necessary
