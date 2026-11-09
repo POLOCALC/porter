@@ -201,7 +201,7 @@ class Valon:
             raise RuntimeError("Synth is configured but did not answer the ID request")
         logger.info(f"Synthesizer initialized with ID: {synth_id}")
         
-    def configure(self,config):
+    def configure(self, config):
         """
         Configure the synthesizer according to the config dictionary.
         Parameters:
@@ -216,7 +216,7 @@ class Valon:
             self.set_amd(config["mod_amp"], config["mod_freq"])
         else:
             logger.info(f"Disabling synth amplitude modulation")
-            config.set_amd(0, 0)
+            self.set_amd(0, 0)
 
     def close_connection(self, valon_off=False):
         """
