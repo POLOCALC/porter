@@ -1,10 +1,10 @@
 # PORTER
 
-PORTER is the flight/control software for the **POLOCALC** drone-based payload. It runs on the payload's onboard computer (a Raspberry Pi 5, `RPi5_dev` branch, porter version `4.1`) and:
+PORTER is the flight/control software for the **POLOCALC** drone-based payload. It runs on the payload's onboard computer (a Raspberry Pi 5, `main` branch, porter version `4.2`) and:
 
 - reads out the payload sensors (GPS, IMX5 IMU/INS, ADC, legacy inertial sensors, temperature) and writes their raw data to disk,
-- drives the science camera (Alvium industrial camera through `pyalvium`, the compiled `alvium` binary, or a Sony camera through `sour_core`),
-- configures a Valon RF synthesizer used as a signal source,
+- drives the science camera (Alvium industrial camera over USB through `pyalvium` or over the Pi 5 CSI-2 connector through `pyalvium_csi`, the compiled `alvium` binary, or a Sony camera through `sour_core`),
+- configures the RF synthesizer used as a signal source (Valon or Windfreak SynthHD),
 - drives a stabilized gimbal (through the `lager` module) for autonomous point-of-interest (POI) tracking, using the drone's DRTK position or the payload GPS,
 - keeps a command and telemetry link with the ground station over an XBee radio,
 - stops the acquisition cleanly before the disk fills up.
@@ -45,14 +45,15 @@ porter/
 ├── exceptions.py             # ServiceExitError / FlagSetError / DiskSpaceError
 ├── pi5_autoconfig.sh         # one-time Raspberry Pi 5 setup (network, sudo, packages, config.txt), then runs the installer
 ├── install_porter.sh         # installer: venv, Python packages, sensor binaries, systemd units (safe to re-run)
+├── requirements.lock         # exact Python package versions installed by install_porter.sh
 ├── config.txt                # Raspberry Pi boot configuration, installed to /boot/firmware/config.txt
-├── config/
-│   └── default.yml           # configuration used by default (and replaced by `setconfig`)
+├── config/                   # YAML configurations (see "Configuration files")
 ├── porter/
 │   ├── threads.py            # thread classes: Sensors, cameras, PointingController, StatusWriter, DiskGuard
 │   ├── PositionSource.py     # chooses the position used for pointing: drone DRTK or payload GPS
 │   ├── process_utils.py      # start/stop of sensor binaries (process groups, registry, clean kill)
 │   ├── valon.py              # serial driver for the Valon RF synthesizer
+│   ├── windfreak/            # serial driver for the Windfreak SynthHD RF synthesizer
 │   └── sensors/              # Python wrappers, one per sensor type (see "Sensors")
 ├── telemetry/                # radio daemon, ground station, radio protocol (see telemetry/README.md)
 ├── services/                 # systemd units and boot scripts (see services/README.md)
@@ -60,7 +61,7 @@ porter/
 │   └── plot_sensors_data.py  # plots every sensor (and, through lager, the gimbal and drone) of a run
 ├── power_monitor/            # draft INA228 power daemon, NOT implemented (see power_monitor/README.md)
 ├── modules/                  # git submodules (sensor binaries, camera, gimbal and drone) + cross-build files
-├── other/                    # old GPS helper scripts, not used (see "Legacy scripts")
+├── other/                    # camera_preview.py (focus/exposure tool) and old GPS scripts (see "Other scripts")
 ├── test/                     # manual hardware test scripts
 ├── version_history.txt       # changelog
 └── LICENSE                   # MIT
@@ -71,7 +72,7 @@ porter/
 - **Hardware:** a Raspberry Pi 5 with:
   - the sensors on I2C/UART/USB,
   - an XBee radio on USB (`/dev/ttyUSB0`),
-  - optionally a Valon synthesizer, a Gremsy T7 gimbal, a DJI drone telemetry link, and an Alvium or Sony camera.
+  - optionally a Valon or Windfreak SynthHD synthesizer, a Gremsy T7 gimbal, a DJI drone telemetry link, and an Alvium (USB or CSI-2) or Sony camera.
 - **Operating system:** Raspberry Pi OS Lite 64-bit (Bookworm), with SSH enabled.
 - **User and paths:** the software assumes:
   - user `polocalc`, home `/home/polocalc` (`parameters.home_directory`),
@@ -82,7 +83,7 @@ porter/
 - **Permissions:** `polocalc` needs:
   - passwordless `sudo`, because telemd runs `sudo systemctl`, `sudo reboot` and `sudo shutdown` (`pi5_autoconfig.sh` sets this up),
   - read/write access to the serial and I2C devices (the `dialout` and `i2c` groups).
-- **Vimba X SDK** (Allied Vision) installed under `/opt/VimbaX_*`, for the Alvium camera (`vmbpy`, the `alvium` binary).
+- **Vimba X SDK** (Allied Vision), for the Alvium camera (`vmbpy`, the `alvium` binary). `install_porter.sh` unpacks `modules/VimbaX_Setup-*-Linux_ARM64.tar.gz` into `/opt/VimbaX_<version>` and runs `cti/Install_GenTL_Path.sh` (sets `GENICAM_GENTL64_PATH` from `/etc/profile.d`, active after a reboot). The tarball is **not in the repository** (Allied Vision licence, 74 MB; ignored by `.gitignore`): download it from the [Vimba X page](https://www.alliedvision.com/en/products/vimba-sdk/) (ARM64 version, after accepting the licence) and copy it into `modules/` on the Pi before running the installer. Without it, the installer skips Vimba X with a warning (listed at the end as "Skipped") and installs everything else: the USB Alvium won't work until you copy the tarball and run the installer again. The CSI Alvium doesn't need Vimba X.
 - **Time sync:** `chrony`. telemd reports its status in the telemetry.
 
 The installer brings in the rest: the Rust toolchain if `cargo` is missing, `python3-venv`, the Python packages and the build of each submodule.
@@ -129,21 +130,23 @@ It:
   - installs the Rust toolchain (`rustup`, into `~/.cargo`) if `cargo` is missing,
 - **sets up the venv:** creates `/home/polocalc/porter_venv` if it doesn't exist, and upgrades `pip`,
 - **installs the Python packages into the venv:**
-  - `numpy`, `scipy`, `opencv-python-headless`,
+  - every package at the exact version listed in `requirements.lock` (taken from the working flight Pi, so new PyPI releases can't break an install),
   - `vmbpy` (the wheel in `modules/`),
-  - `pyalvium`, `lager` and `sour_core` (editable, from `modules/`),
-  - `digi-xbee`, `pyubx2`, `pyyaml`, `pyusb`, `adafruit-circuitpython-ina228`, `adafruit-circuitpython-mcp4725`,
+  - `pyalvium`, `pyalvium_csi`, `lager` and `sour_core` (editable, from `modules/`, without dependencies: those are in `requirements.lock`),
+  - then runs `pip check`, which fails if `requirements.lock` misses a dependency,
 - **builds the binaries:**
   - ADS1015, Inertial and LM76: `build_for_pi.sh` in each submodule, which also links the binary into `~/.local/bin`,
-  - Alvium: `build.sh` in Alvium-Camera-Module,
+  - the Alvium CSI-2 kernel driver: `make && sudo make install` in `Alvium-Camera-Module-CSI/alvium-raspberrypi-driver-release`,
+  - Vimba X: unpacks the SDK into `/opt` (see "Requirements") and points the `vimbax` alias in `~/.bashrc` to its viewer; skipped with a warning if the tarball isn't in `modules/`,
+  - the `alvium` binary (Alvium-Camera-Module, for `Alvium_Starspec`) is **not** built any more: its line is commented out in the installer,
   - IMX5: links the prebuilt `modules/IMX-5-Sensor-Module/bin/IMX5SensorModule` into `~/.local/bin`,
-- **installs the systemd units:** copies `services/telemd.service`, `porter@.service`, `psdk-bridge.service` and `rcd.service` to `/etc/systemd/system/` and `services/99-xbee.rules` to `/etc/udev/rules.d/`, reloads systemd, then enables telemd (and psdk-bridge and rcd if `psdk_telemetry` was built). Set the XBee's USB serial in `99-xbee.rules` first, see [services/README.md](services/README.md).
+- **installs the systemd units:** copies `services/telemd.service`, `porter@.service`, `psdk-bridge.service` and `rcd.service` to `/etc/systemd/system/` and `services/99-xbee.rules` to `/etc/udev/rules.d/`, reloads systemd, then enables telemd (and psdk-bridge and rcd if `psdk_telemetry` was built). psdk-bridge and rcd are not started by the installer, because connecting to the drone takes about a minute: they start at the next reboot. Set the XBee's USB serial in `99-xbee.rules` first, see [services/README.md](services/README.md).
 
-Every failed step is listed at the end. If any package or build fails, the systemd part is skipped and the script exits with code 1. Every step is safe to repeat. All output is also saved to `~/porter_install.log`.
+Every failed step is listed at the end. If any package or build fails, the systemd part is skipped and the script exits with code 1. A missing Vimba X tarball is not a failure: it's listed separately as "Skipped". Every step is safe to repeat. All output is also saved to `~/porter_install.log`.
 
 **Check:** with the XBee plugged in, `systemctl status telemd` should be `active (running)`, and the ground station should start receiving telemetry. On a Matrice 400, `systemctl status rcd` should be `active (running)`, and DJI Pilot 2 should show the status line.
 
-**Binaries on `PATH`:** the sensor binaries are called by name (`ads1015`, `inertial`, `IMX5SensorModule`, `LM76SensorModule`, `alvium`). `porter@.service` starts `control.py` through `bash --login`, which loads `~/.profile`, and with it `~/.local/bin` and the Vimba/GenICam variables. Alvium's `build.sh` does not link the `alvium` binary into `~/.local/bin`: link it by hand if you use the `Alvium_Starspec` camera.
+**Binaries on `PATH`:** the sensor binaries are called by name (`ads1015`, `inertial`, `IMX5SensorModule`, `LM76SensorModule`, `alvium`). `porter@.service` starts `control.py` through `bash --login`, which loads `~/.profile`, and with it `~/.local/bin` and the Vimba/GenICam variables. The installer doesn't build the `alvium` binary: to use the `Alvium_Starspec` camera, run `build.sh` in `modules/Alvium-Camera-Module` and link the binary into `~/.local/bin` by hand.
 
 ### Raspberry Pi boot configuration ([config.txt](config.txt))
 
@@ -167,8 +170,9 @@ Besides the Raspberry Pi OS defaults, it:
 | `LM76-Temperature-Sensor` | Rust program for the TI LM76 I2C temperature sensor. |
 | `IMX-5-Sensor-Module` | C++ program (Inertial Sense SDK) for the IMX-5 IMU/INS; ships a prebuilt binary in `bin/`. |
 | `Alvium-Camera-Module` | C/C++ program for the Alvium camera (`alvium` binary). |
-| `Alvium-Camera-Module-Python` | Python module `pyalvium`: Alvium control through `vmbpy`, with parallel frame writing. |
-| `lager` | "Live Attitude and Gimbal Error Resolver": Gremsy T7 gimbal control and passive DJI drone telemetry, for POI tracking. It contains the `Payload-SDK` submodule, DJI's Payload SDK fork for the Matrice 400 telemetry through the E-Port (see its [README](modules/lager/modules/Payload-SDK/README.md)); `git submodule update --init --recursive` fetches it. |
+| `Alvium-Camera-Module-Python` | Python module `pyalvium`: Alvium control through `vmbpy` (USB), with parallel frame writing. |
+| `Alvium-Camera-Module-CSI` | Python module `pyalvium_csi`: same interface as `pyalvium`, for an Alvium on the Pi 5 CSI-2 connector (`media-ctl`/`v4l2-ctl`). Also holds Allied Vision's CSI-2 kernel driver. |
+| `lager` | "Live Attitude and Gimbal Error Resolver": Gremsy T7 gimbal control and passive DJI drone telemetry (Matrice 600 over serial, Matrice 400 through the Payload SDK), for POI tracking with an optional constant roll. It contains the `Payload-SDK` submodule, DJI's Payload SDK fork for the Matrice 400 telemetry through the E-Port (see its [README](modules/lager/modules/Payload-SDK/README.md)); `git submodule update --init --recursive` fetches it. |
 | `sour_core` | Shared code (e.g. Sony camera control) used by porter and the SOUR GUI project. |
 
 ## Running porter
@@ -176,8 +180,8 @@ Besides the Raspberry Pi OS defaults, it:
 ### From the ground (normal operation)
 
 In the ground station:
-- `start` runs porter with `config/default.yml`,
-- `start <name>` runs it with `config/<name>.yml`, for example `start test_configs/starspec`,
+- `start <name>` runs porter with `config/<name>.yml`, for example `start 90GHz_M400`,
+- `start` runs it with `config/default.yml` (in the repository, a copy of `90GHz_M400.yml`; replace it on the Pi, or with `setconfig`, to change what a plain `start` uses),
 - `stop` stops it cleanly.
 
 See [telemetry/README.md](telemetry/README.md) for all commands.
@@ -185,11 +189,11 @@ See [telemetry/README.md](telemetry/README.md) for all commands.
 ### From the drone's remote controller (Matrice 400)
 
 With `psdk-bridge.service` and `rcd.service` running, DJI Pilot 2 shows a POLOCALC widget panel. It travels over the drone's own radio link:
-- **Start acquisition** runs porter with the configuration chosen in the **Configuration** list (the `.yml` files of `config/` when the service started; `default` is selected at start),
+- **Start acquisition** runs porter with the configuration chosen in the **Configuration** list (the `.yml` files of `config/` when the service started; `default` is selected at start if it exists, otherwise the first file in alphabetical order),
 - **Stop acquisition** stops it,
 - **POI tracking** starts or stops the gimbal's POI tracking,
 - **Shutdown Pi** shuts the Pi down cleanly, like the XBee `shutdown` command: press it, then press it again within 5 s to confirm,
-- the floating window shows a status line every 2 s, e.g. `RUN default_M400 12:34 | CAM 30fps | GPS 3D 24 | RTK 50 | BAT 78% | POI on 152m | PPS | 112GB | 50C` (`PPS`, the chrony reference, or `NOSYNC`), and the reply to each command.
+- the floating window shows a status line every 2 s, e.g. `RUN 90GHz_M400 12:34 | CAM 30fps | GPS 3D 24 | RTK 50 | BAT 78% | POI on 152m | PPS | 112GB | 50C` (`PPS`, the chrony reference, or `NOSYNC`), and the reply to each command.
 
 rcd runs these commands with the same checks as the XBee ones (`telemetry/payload_control.py`), and the two links never start or stop porter at the same time. RC commands appear in `journalctl -u rcd`, not on the ground station. The XBee stays the only link while the drone is off, and on the Matrice 600.
 
@@ -198,23 +202,23 @@ rcd runs these commands with the same checks as the XBee ones (`telemetry/payloa
 The instance name after `@` selects the configuration file, relative to `config/` and without `.yml`:
 
 ```sh
-sudo systemctl start porter@default                  # control.py -c config/default.yml
+sudo systemctl start porter@90GHz_M400               # control.py -c config/90GHz_M400.yml
 sudo systemctl start porter@test_configs-starspec    # control.py -c config/test_configs/starspec.yml
 sudo systemctl stop 'porter@*'
 journalctl -u 'porter@*' -f
 ```
 
-In an instance name, `-` stands for `/`. To use a config whose file name contains a real `-`, get the unit name from `systemd-escape --template=porter@.service <name>`.
+In an instance name, `-` stands for `/`. To use a config whose file name contains a real `-`, get the unit name from `systemd-escape --template=porter@.service <name>`. `porter@default` uses `config/default.yml`.
 
 Only one porter instance should run at a time. telemd and rcd refuse `start` while any `porter@` unit is starting or running, and wait for a stop in progress to finish.
 
 ### By hand (development)
 
 ```sh
-/home/polocalc/porter_venv/bin/python3 control.py [-c config/default.yml]
+/home/polocalc/porter_venv/bin/python3 control.py -c config/90GHz_M400.yml
 ```
 
-`-c` accepts a path relative to the repository root, or an absolute path. Stop with Ctrl+C.
+`-c` accepts a path relative to the repository root, or an absolute path; without `-c`, `control.py` uses `config/default.yml`. Stop with Ctrl+C.
 
 ### What `control.py` does
 
@@ -225,7 +229,7 @@ Only one porter instance should run at a time. telemd and rcd refuse `start` whi
    2. the disk-space check, then the DiskGuard (see "Disk space"),
    3. one thread per configured sensor,
    4. the GNSS source for the gimbal (the first `GPS*` sensor),
-   5. the Valon synthesizer (if a `source` block is configured),
+   5. the RF synthesizer, Valon or SynthHD (if a `source` block is configured),
    6. the camera,
    7. the pointing controller,
    8. the CommandServer (`/tmp/porter_cmd.sock`).
@@ -235,7 +239,7 @@ Only one porter instance should run at a time. telemd and rcd refuse `start` whi
 - **A sensor that fails** to start, or stops sending data, is marked `dead` in the telemetry with the reason. The other sensors keep running.
 - **A gimbal or drone that is missing or disconnects** is reported in the telemetry (see "Pointing"), and porter keeps retrying. The run continues.
 - **The camera:** an unknown camera name in the configuration stops the run. A camera that can't be opened, or stops while running, is logged in `flight.log`, but the sensors keep acquiring.
-- **Other errors at startup** log the traceback and stop everything with exit code 1. That includes a Valon that is configured but missing or not answering: a configured source is required.
+- **Other errors at startup** log the traceback and stop everything with exit code 1. That includes a synthesizer (Valon or SynthHD) that is configured but missing or not answering: a configured source is required.
 
 **Exit codes:** 0 = normal stop, 1 = error, 2 = stopped (or not started) because of disk space.
 
@@ -251,7 +255,7 @@ Only one porter instance should run at a time. telemd and rcd refuse `start` whi
 ├── current -> 007_20260928_120000/
 └── 007_20260928_120000/
     ├── flight.log                            # porter log
-    ├── default.yml                           # copy of the configuration used
+    ├── <config>.yml                          # copy of the configuration used
     ├── uav_telemetry.bin                     # drone telemetry recorded by lager
     ├── gimbal_telemetry.bin                  # gimbal telemetry recorded by lager
     ├── sensors_data/
@@ -266,6 +270,23 @@ Only one porter instance should run at a time. telemd and rcd refuse `start` whi
 `<sensor>` is the `name` from the configuration, and `<timestamp>` is the run's start time. When a sensor stops unexpectedly, its `_stdout.log` usually says why.
 
 ## Configuration
+
+### Configuration files
+
+`config/` holds:
+
+| File | Use |
+|---|---|
+| `<band>_<drone>.yml`: `90GHz_*`, `150GHz_*`, `260GHz_*` | Flight configurations, one per source band and drone setup. The band sets the `source` block and the camera: Alvium (USB) at 90 GHz, Alvium CSI-2 at 150 GHz, Sony at 260 GHz. |
+| … `_M400` | DJI Matrice 400 with the Gremsy T7: gimbal control and drone telemetry through psdk-bridge. |
+| … `_M600_gremsy` | DJI Matrice 600 with the Gremsy T7: gimbal control and drone telemetry over serial. |
+| … `_M600_ronin` | DJI Matrice 600 with the Ronin gimbal: no `pointing_controller` block, so porter drives neither the gimbal nor reads the drone telemetry. |
+| `example_M400.yml`, `example_M600_gremsy.yml`, `example_M600_ronin.yml`, `example_AlviumCSI.yml` | Starting points for new configurations, without a `source` block. |
+| `test_synth_config.yml` | Bench test of the SynthHD alone. |
+
+`config/default.yml` is the file used by a plain `start`, by `control.py` without `-c`, the one the RC preselects, and the one `setconfig` overwrites. In the repository it's a copy of `90GHz_M400.yml`. A `setconfig` changes it on the Pi, so `git status` there shows it as modified: run `git checkout config/default.yml` before a `git pull` if git refuses to update it.
+
+### Keys
 
 `control.py` reads one YAML file. The top-level keys are:
 
@@ -282,26 +303,45 @@ Only one porter instance should run at a time. telemd and rcd refuse `start` whi
   - a driver-specific `configuration` block.
 
   The first key starting with `GPS` is also the payload position source for pointing.
-- **`source`**: the Valon synthesizer:
-  - `port`, `baudrate`,
-  - `freq` (MHz, before `mult_factor`), `power` (dBm),
-  - `mod_amp` (dB) and `mod_freq` (Hz; 0 disables AM).
+- **`source`**: the RF synthesizer:
+  - `name`: `valon` or `synthhd` (any case),
+  - a `config` block with:
+    - `port` (and `baudrate` for the Valon),
+    - `freq`: the **output frequency in GHz, after the multiplier**, and `mult_factor`: porter sets the synthesizer to `freq / mult_factor`,
+    - `power` (dBm),
+    - `mod_amp` (dB) and `mod_freq` (Hz; 0 disables AM),
+    - SynthHD only: `channel` (RF output, 0 or 1) and `mod_funct` (`sine` or `square_wave`). To drive both channels, give `channel`, `freq`, `mult_factor`, `power`, `mod_amp`, `mod_freq` and `mod_funct` as lists, one value per channel.
 
-  If present, the Valon must answer, or porter aborts.
-- **`camera`**: `name` (`Alvium`, `Alvium_Starspec` or `Sony`), plus camera settings (exposure, gain, format, frame rate, writing threads, ROI, …).
+  ```yaml
+  source:
+    name: valon
+    config:
+      port: /dev/ttyAMA3
+      baudrate: 115200
+      freq: 93            # GHz, after the multiplier
+      mult_factor: 6
+      power: -10          # dBm
+      mod_amp: 22         # dB
+      mod_freq: 37        # Hz
+  ```
+
+  If present, the synthesizer must answer, or porter aborts.
+- **`camera`**: `name` (`Alvium`, `Alvium_CSI`, `Alvium_Starspec` or `Sony`), plus camera settings (exposure, gain, format, frame rate, writing threads, ROI, …).
 - **`pointing_controller`**: `name: lager`, with:
   - a `gimbal` block (Gremsy T7: serial port, baud rate, timeout, simulator flag),
-  - a `uav` block (DJI drone telemetry: serial port, simulator flag),
-  - a `poi` block (target latitude, longitude, **altitude above mean sea level**, `max_distance`).
+  - a `uav` block (DJI drone telemetry: the serial port on the Matrice 600; on the Matrice 400, `socket: /tmp/psdk_telemetry.sock` to read it from psdk-bridge),
+  - a `poi` block (target latitude, longitude, **altitude above mean sea level**, `max_distance`, and an optional `roll_deg`: a constant gimbal roll kept while tracking, default 0 = horizon level).
 
   Leave out `gimbal` or `uav` if that device isn't used. Only configured devices appear in the telemetry.
 - **`position_source`**: how the pointing position is chosen (see "Pointing").
 
-**Changing the configuration remotely:** `setconfig <file>` from the ground station replaces `config/default.yml`. It checks the upload is valid YAML first, and keeps the previous file as `config/default.yml.bak`. The new file is used at the next `start`.
+**Changing the configuration remotely:** `setconfig <file>` from the ground station overwrites `config/default.yml`. It checks the upload is valid YAML first, and keeps the previous file as `config/default.yml.bak`. The new file is used at the next plain `start`.
+
+**Duplicate keys:** if a top-level key such as `pointing_controller` appears twice in a file, YAML silently keeps only the last one. Keep one block per key.
 
 `parameters.py` holds values that don't change per run:
 - logging format and level,
-- `ATTEMPTS` (retry count, e.g. for the Valon ID),
+- `ATTEMPTS` (retry count, e.g. for the synthesizer ID),
 - the signals caught (`SIGINT`, `SIGTERM`),
 - `SHUTDOWN_TIMEOUT`, `SENSOR_INIT_TIMEOUT`, `STATUS_WRITER_UPDATE_RATE`,
 - the data-folder names and `INCREMENTAL_FILE_PREFIX` (the `NNN_` run numbers).
@@ -401,12 +441,13 @@ The mode can be changed during a flight with `position.mode <auto|payload|uav>`.
 ## Camera and source
 
 - **Camera** (`camera` block, see `porter/threads.py`):
-  - **`Alvium`** (Python, `pyalvium`) starts at startup or with `camera.start`.
+  - **`Alvium`** (Python, `pyalvium`, USB) starts at startup or with `camera.start`.
+  - **`Alvium_CSI`** (Python, `pyalvium_csi`, Pi 5 CSI-2 connector) works the same way. It needs the CSI-2 kernel driver built by the installer.
   - **`Alvium_Starspec`** runs the `alvium` binary.
   - **`Sony`** uses `sour_core.sony`, in video or photo mode.
 
   telemd's `camera.capture` takes one frame with `telemetry/alvium_capture.py` and sends it to the ground.
-- **Valon synthesizer** (`source` block, `porter/valon.py`): at startup, porter checks that the Valon answers its ID request, then sets the frequency, power and AM modulation. A configured Valon that is missing or silent stops the run.
+- **RF synthesizer** (`source` block): **Valon** (`porter/valon.py`) or **Windfreak SynthHD** (`porter/windfreak/`). At startup, porter checks that the synthesizer answers its ID request, then sets the frequency, power and AM modulation (SynthHD: sine or square wave, through its AM lookup table). A configured synthesizer that is missing or silent stops the run.
 
 ## Plotting a run
 
@@ -421,9 +462,15 @@ The mode can be changed during a flight with `position.mode <auto|payload|uav>`.
 - **Time axis:** all plots share one axis (seconds since the run start). The GPS time of week is converted to it.
 - **The pointing controller:** if the configuration has one, the script also runs lager's `decoder/plot_telemetry.py` on the same folder, for the drone and gimbal plots in `<run>/pointing_controller_plots/`. `--no-telemetry` skips that.
 
-## Legacy scripts
+## Other scripts
 
-`other/` holds `setup_gps.py`, `startup_nmea.py` and `startup_script.sh`. They predate the current design and are not used:
+**`other/camera_preview.py`:** live view of the Alvium camera, for setting exposure, gain and focus before a flight. It needs a display (HDMI, VNC or `ssh -X`), and porter must not be acquiring at the same time:
+```sh
+/home/polocalc/porter_venv/bin/python3 other/camera_preview.py --backend csi    # or --backend usb
+```
+It shows a focus value (to maximise while turning the focus ring), can save frames, and prints the settings as a YAML snippet for the configuration. The full key list is at the top of the script.
+
+**Legacy scripts:** `other/` also holds `setup_gps.py`, `startup_nmea.py` and `startup_script.sh`. They predate the current design and are not used:
 - `setup_gps.py` uses an old calling convention and doesn't run,
 - `startup_nmea.py` assumes 38400 baud,
 - `startup_script.sh` points to an old path.
@@ -448,11 +495,12 @@ The GPS is now configured by `porter/sensors/ubx.py` at every start. `test/` con
 
 See `version_history.txt`. Current version:
 
-> **V4.1**
-> - Several bugs fixed
-> - Tested Valon and other RF-related components
-> - New thermal control handling for the frequency multiplier
-> - DiskGuard thread for a safe acquisition stop when the disk is full
+> **V4.2.1**
+> - New systemd service for the DJI Matrice 400 PSDK telemetry
+>
+> **V4.2**
+> - Support for the DJI Matrice 400
+> - Bugs fixed
 
 ## License
 

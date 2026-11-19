@@ -35,6 +35,7 @@ if [ "$EUID" -eq 0 ]; then
 fi
 
 FAILURES=()
+WARNINGS=()     # optional parts that were skipped: reported at the end, but they don't block the install
 
 # step NAME COMMAND...   run a command, record a failure without stopping the script
 step() {
@@ -107,20 +108,17 @@ step "pip upgrade" "$PIP" install --upgrade pip
 echo ""
 echo "[3/5] Installing Python packages..."
 
-step "numpy"         "$PIP" install numpy==2.2.4
-step "scipy"         "$PIP" install scipy==1.15.3
-step "opencv"        "$PIP" install opencv-python
-step "VmbPy"         "$PIP" install "$REPO_DIR/modules/vmbpy-1.2.1-py3-none-any.whl"
-step "Pyalvium"      "$PIP" install -e "$REPO_DIR/modules/Alvium-Camera-Module-Python"
-step "Pyalvium CSI"  "$PIP" install -e "$REPO_DIR/modules/Alvium-Camera-Module-CSI"
-step "digi-xbee"     "$PIP" install digi-xbee==1.5.0
-step "ina228"        "$PIP" install adafruit-circuitpython-ina228
-step "pyubx2"        "$PIP" install pyubx2
-step "mcp4725"       "$PIP" install adafruit-circuitpython-mcp4725
-step "pyusb"         "$PIP" install pyusb
-step "pyyaml"        "$PIP" install pyyaml
-step "lager"         "$PIP" install -e "$REPO_DIR/modules/lager"
-step "sourcore"      "$PIP" install -e "$REPO_DIR/modules/sour_core"
+# every package at the exact version of the working flight Pi (requirements.lock), so that a new release on
+# PyPI can't break a fresh install (e.g. Adafruit-Blinka 10, which needs gpiod)
+step "pinned packages (requirements.lock)" "$PIP" install -r "$REPO_DIR/requirements.lock"
+step "VmbPy"         "$PIP" install --no-deps "$REPO_DIR/modules/vmbpy-1.2.1-py3-none-any.whl"
+# local modules with --no-deps: their dependencies are already in requirements.lock
+step "Pyalvium"      "$PIP" install --no-deps -e "$REPO_DIR/modules/Alvium-Camera-Module-Python"
+step "Pyalvium CSI"  "$PIP" install --no-deps -e "$REPO_DIR/modules/Alvium-Camera-Module-CSI"
+step "lager"         "$PIP" install --no-deps -e "$REPO_DIR/modules/lager"
+step "sourcore"      "$PIP" install --no-deps -e "$REPO_DIR/modules/sour_core"
+# fails if requirements.lock misses a dependency of one of the packages above
+step "pip check"     "$PIP" check
 
 # -------------------------------------------------------------
 # 4. SENSOR AND CAMERA BINARIES
@@ -136,6 +134,44 @@ step_in "$REPO_DIR/modules/LM76-Temperature-Sensor"  "LM76-Temperature-Sensor" .
 
 # Allied Vision Alvium CSI-2 driver (submodule of Alvium-Camera-Module-CSI)
 step_in "$REPO_DIR/modules/Alvium-Camera-Module-CSI/alvium-raspberrypi-driver-release" "Alvium CSI driver" "make && sudo make install"
+
+# Vimba X SDK (Allied Vision): unpack the tarball copied into modules/ into /opt and register the
+# transport layers (cti/Install_GenTL_Path.sh writes /etc/profile.d/VimbaX_GenTL_Path_64bit.sh, which
+# exports GENICAM_GENTL64_PATH for login shells, and the USB udev rule). Active after the next login/reboot.
+# The tarball is not in the repository (Allied Vision licence): if it's missing, Vimba X is skipped with a
+# warning and the rest of the install goes on (the USB Alvium won't work; the CSI Alvium doesn't need it).
+vimbax_install() {
+    local tarball topdir
+    tarball="$(ls "$REPO_DIR"/modules/VimbaX_Setup-*-Linux_ARM64.tar.gz 2>/dev/null | sort | tail -n 1)"
+    if [ -z "$tarball" ]; then
+        echo "    WARNING: no VimbaX_Setup-*-Linux_ARM64.tar.gz in $REPO_DIR/modules: Vimba X not installed"
+        WARNINGS+=("Vimba X SDK skipped: copy VimbaX_Setup-*-Linux_ARM64.tar.gz into $REPO_DIR/modules and run this script again (needed by the USB Alvium)")
+        return 0
+    fi
+    if [ "$(uname -m)" != "aarch64" ]; then
+        echo "    $(basename "$tarball") is for ARM64, this machine is $(uname -m): skipped"
+        return 0
+    fi
+    topdir="$(tar tzf "$tarball" | head -n 1 | cut -d/ -f1)"     # e.g. VimbaX_2026-3
+    VIMBAX_DIR="/opt/$topdir"
+    if [ -x "$VIMBAX_DIR/cti/Install_GenTL_Path.sh" ]; then
+        echo "    $VIMBAX_DIR already present, not unpacking again"
+    else
+        echo "    Unpacking $(basename "$tarball") into /opt..."
+        sudo tar xzf "$tarball" -C /opt || return 1
+    fi
+    sudo "$VIMBAX_DIR/cti/Install_GenTL_Path.sh" || return 1
+
+    # vimbax alias -> this version's viewer (replace an old alias, e.g. to VimbaX_2026-1, or add it)
+    local alias_line="alias vimbax='$VIMBAX_DIR/bin/VimbaXViewer'"
+    if grep -qs "^[[:space:]]*alias vimbax=" "$HOME/.bashrc"; then
+        sed -i "s|^\([[:space:]]*\)alias vimbax=.*|\1$alias_line|" "$HOME/.bashrc"
+    else
+        echo "$alias_line" >> "$HOME/.bashrc"
+    fi
+    echo "    ~/.bashrc: $alias_line"
+}
+step "Vimba X SDK" vimbax_install
 
 # IMX5 (prebuilt binary): symlink it into ~/.local/bin so it runs from anywhere
 imx5_link() {
@@ -178,6 +214,11 @@ if ! grep -qs 'HOME/.local/bin' "$HOME/.bashrc"; then
 fi
 
 if [ ${#FAILURES[@]} -gt 0 ]; then
+    if [ ${#WARNINGS[@]} -gt 0 ]; then
+        echo ""
+        echo "Skipped (install not blocked):"
+        for w in "${WARNINGS[@]}"; do echo "  - $w"; done
+    fi
     echo ""
     echo "The following steps failed, systemd units NOT installed:"
     for f in "${FAILURES[@]}"; do echo "  - $f"; done
@@ -259,16 +300,24 @@ install_vcom_udev_rule() {
 
 # PSDK bridge (Matrice 400): drone link from boot, 24 V on the E-Port, RC widgets. Needs psdk_telemetry (built
 # above only when the DJI credentials are set). On a Matrice 600 setup: sudo systemctl disable --now psdk-bridge rcd
+# Only enabled here, not (re)started: a start waits for DjiCore_Init (~40 s, longer without a drone) and the
+# gimbal power check, and rcd (After=psdk-bridge) would wait for it too. Both start at the next reboot.
 if [ "$HAVE_GADGET" = 1 ] && [ -x "$BIN_DIR/psdk_telemetry" ]; then
     step "enable psdk-bridge"  sudo systemctl enable psdk-bridge.service
-    step "restart psdk-bridge" sudo systemctl restart psdk-bridge.service
     # rcd: the DJI Pilot 2 widgets <-> porter, independent of telemd and the XBee
     step "enable rcd"  sudo systemctl enable rcd.service
-    step "restart rcd" sudo systemctl restart rcd.service
+    echo "    psdk-bridge and rcd enabled: they start at the next reboot"
+    echo "    (or now: sudo systemctl restart --no-block psdk-bridge rcd)"
 else
     echo "    psdk_telemetry not built or USB gadget missing: psdk-bridge.service and rcd.service installed but not enabled"
 fi
 
+
+if [ ${#WARNINGS[@]} -gt 0 ]; then
+    echo ""
+    echo "Skipped (install not blocked):"
+    for w in "${WARNINGS[@]}"; do echo "  - $w"; done
+fi
 
 if [ ${#FAILURES[@]} -gt 0 ]; then
     echo ""

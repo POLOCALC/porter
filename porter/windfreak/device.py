@@ -49,7 +49,6 @@ class SerialDevice:
         Args:
             data (str): write data
         """
-        print(data)
         self._dev.write(data.encode('utf-8'))
 
     def _read(self):

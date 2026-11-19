@@ -116,8 +116,6 @@ class SynthHDChannel:
         POWER_HIGH = pow_level            # dBm when "on"
         POWER_LOW  = pow_level - amd_db   # dBm when "off"
 
-        print(POWER_HIGH,POWER_LOW)
-
         if POWER_LOW==-75:
             logger.error("Minimum AM power not allowed (-75 dBm)")
             return None
@@ -152,16 +150,12 @@ class SynthHDChannel:
 
             added_delay_us = max(0,((period_us / N) - BASE_SAMPLE_US))
 
-            print(added_delay_us,N)
-
             self.write('am_time_step', added_delay_us)
             self.write('am_num_samples', N)
 
             # power levels:
             power_mid = (POWER_HIGH + POWER_LOW) / 2.0
             power_amp = amd_db/2
-
-            print(power_mid,power_amp)
 
             # Fill the register with the amplitude values
             angles = []
@@ -174,7 +168,6 @@ class SynthHDChannel:
                 self.write('am_lookup_table', i, power_i)
 
             plt.plot(angles,powers)
-            print(N, len(powers))
             # Fill remaining slots with -75.0 (skipped by firmware)
             for i in range(N, 100):
                 self.write('am_lookup_table', i, -75.0)

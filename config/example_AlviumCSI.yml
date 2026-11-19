@@ -1,0 +1,30 @@
+# --- GLOBAL PARAMETERS --- #
+# Global parameters for the Porter telemetry system.
+global:
+  name: porter                                          # Name of the configuration
+  version: 4.2                                          # Version of the flight software
+  description: Configuration for Porter                 # Description of the configuration
+  autostart_camera: True                                # Whether to start the camera automatically
+  autostart_poi_tracking: False                         # Whether to start POI tracking automatically
+  disk_guard:
+    min_free_gb: 0.8                                    # Minimum free space in GB allowed before stopping acquisition
+    start_min_free_gb: 5.0                              # Minimum free space in GB to start acquisition
+    stop_margin_s: 30                                   # Margin in seconds to stop acquisition
+    warn_margin_s: 1200                                 # Margin in seconds to warn about low disk space
+    interval_s: 3                                       # Interval in seconds to check disk space
+    window_s: 45                                        # Window in seconds to compute an average disk space usage
+
+# --- CAMERA --- #
+# Camera configuration for the Porter telemetry system.
+# The camera configuration includes the camera name, sensor core number, 
+# exposure time, gain, image format, maximum framerate, number of threads 
+# for writing images to disk, and verbosity of the camera output.
+camera:
+  name: Alvium_CSI                                      # Name of the camera
+  core: 3                                               # Sensor core number
+  exposure: 20000                                       # Exposure time in microseconds
+  gain: 0.0                                             # Gain in dB
+  format: BayerRG8                                      # Image format
+  max_framerate: 10                                     # Maximum framerate in frames per second
+  writing_threads: 2                                    # Number of threads for writing images to disk
+  verbosity: False                                      # Verbosity of the camera output

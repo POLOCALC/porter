@@ -2,12 +2,12 @@
 
 systemd units and boot scripts for running PORTER on the payload's Raspberry Pi 5. All units assume user `polocalc`, the repository at `/home/polocalc/flight/porter` and the venv at `/home/polocalc/porter_venv`.
 
-| File | Installed by `install_modules.py` | Enabled at boot |
+| File | Installed by `install_porter.sh` | Enabled at boot |
 |---|---|---|
 | `telemd.service` + `99-xbee.rules` | yes | yes, while the XBee is plugged in |
 | `porter@.service` | yes | no, started by telemd or rcd |
-| `psdk-bridge.service` | yes (`install_porter.sh`) | yes, if `psdk_telemetry` was built (Matrice 400) |
-| `rcd.service` | yes (`install_porter.sh`) | yes, if `psdk_telemetry` was built (Matrice 400) |
+| `psdk-bridge.service` | yes | yes, if `psdk_telemetry` was built (Matrice 400); first start at the next reboot |
+| `rcd.service` | yes | yes, if `psdk_telemetry` was built (Matrice 400); first start at the next reboot |
 | `i2c-config.service` + `i2c_startup_config.sh` | no, optional, by hand | optional |
 | `powerd.service` | no, powerd is not implemented | no |
 
@@ -26,13 +26,13 @@ Runs `telemetry/telemd.py`, the XBee radio daemon, while the XBee is plugged in.
 Template unit for `control.py`. The part after `@` selects the configuration, relative to `config/` and without `.yml`:
 
 ```sh
-sudo systemctl start porter@default                  # control.py -c config/default.yml
+sudo systemctl start porter@90GHz_M400               # control.py -c config/90GHz_M400.yml
 sudo systemctl start porter@test_configs-starspec    # control.py -c config/test_configs/starspec.yml
 sudo systemctl stop 'porter@*'
 journalctl -u 'porter@*' -f
 ```
 
-In an instance name, `-` stands for `/`. For a file name containing a real `-`, use `systemd-escape --template=porter@.service <name>` to get the unit name.
+In an instance name, `-` stands for `/`. For a file name containing a real `-`, use `systemd-escape --template=porter@.service <name>` to get the unit name. `porter@default` (used by a plain `start`) runs `config/default.yml`.
 
 What the settings do:
 
@@ -48,11 +48,11 @@ What the settings do:
 
 Matrice 400 only. Runs `psdk_telemetry --service` from boot (the program is in `modules/lager/modules/Payload-SDK`, see its README):
 - connects to the drone through the E-Port (`/dev/ttyGS0`, from `dji-vcom-gadget.service`) and requests 24 V on the E-Port VCC,
-- shows the POLOCALC widgets in DJI Pilot 2: **Start acquisition**, **Stop acquisition**, **POI tracking**, **Shutdown Pi** (press twice within 5 s), the **Configuration** list (the `.yml` files of `config/`, read when the service starts), and a status line in the floating window,
-- serves the drone telemetry to lager on `/tmp/psdk_telemetry.sock` (`socket:` in the `uav.connection` block of `config/default_M400.yml`),
+- shows the POLOCALC widgets in DJI Pilot 2: **Start acquisition**, **Stop acquisition**, **POI tracking**, **Shutdown Pi** (press twice within 5 s), the **Configuration** list (the `.yml` files of `config/`, read when the service starts; `default` is preselected if it exists, otherwise the first file in alphabetical order), and a status line in the floating window,
+- serves the drone telemetry to lager on `/tmp/psdk_telemetry.sock` (`socket:` in the `uav.connection` block of the `*_M400.yml` configurations),
 - sends the RC commands on `/tmp/psdk_control.sock` to rcd, which runs them and sends back the status line (its messages still say "telemd": they mean whatever client is connected, now rcd).
 
-The topic rates are set on its `ExecStart` line. `Restart=always` with a 10 s delay covers "no drone yet" and "link lost". On a Matrice 600 setup it isn't needed: `sudo systemctl disable --now psdk-bridge rcd`. Logs: `journalctl -u psdk-bridge -f`.
+The topic rates are set on its `ExecStart` line. `install_porter.sh` enables psdk-bridge and rcd but doesn't start them, because connecting to the drone takes about a minute: they start at the next reboot, or right away with `sudo systemctl restart --no-block psdk-bridge rcd`. `Restart=always` with a 10 s delay covers "no drone yet" and "link lost". On a Matrice 600 setup it isn't needed: `sudo systemctl disable --now psdk-bridge rcd`. Logs: `journalctl -u psdk-bridge -f`.
 
 ## rcd.service
 

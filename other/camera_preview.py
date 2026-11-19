@@ -6,7 +6,7 @@ to tune exposure time and gain and to adjust the focus ring.
 Usage:
     python3 other/camera_preview.py --backend csi
     python3 other/camera_preview.py --backend usb [--camera-id DEV_1AB22C0707F3]
-    python3 other/camera_preview.py --backend csi --config config/default_M400_CSI.yml
+    python3 other/camera_preview.py --backend csi --config config/configuration_file.yml
 
 Needs a display: run it on the Pi with an HDMI monitor / VNC, or from a laptop
 with `ssh -X polocalc@<pi>` (lower --display-width if X forwarding is slow).
@@ -41,6 +41,14 @@ import tempfile
 import threading
 import time
 import traceback
+
+# pip's opencv-python uses a Qt GUI without bundled fonts: without this the trackbar
+# names are drawn blank. Point Qt at a system font directory (must be set before cv2 loads Qt).
+if 'QT_QPA_FONTDIR' not in os.environ:
+    for _d in ('/usr/share/fonts/truetype/dejavu', '/usr/share/fonts/truetype', '/usr/share/fonts'):
+        if os.path.isdir(_d):
+            os.environ['QT_QPA_FONTDIR'] = _d
+            break
 
 import cv2
 import numpy as np
@@ -300,6 +308,12 @@ class CsiBackend:
 WIN = 'Alvium preview'
 EXP_SLIDER_MAX = 1000
 GAIN_SLIDER_MAX = 1000
+TB_EXP = 'Exposure'     # Qt shows at most 10 characters of a trackbar name
+TB_GAIN = 'Gain'
+PANEL_BG = (40, 40, 40)
+TEXT = (255, 255, 255)
+TEXT_DIM = (170, 170, 170)
+LINE_H = 24
 
 
 class Preview:
@@ -318,6 +332,7 @@ class Preview:
         self.fps_n = 0
         self.fps = 0.0
         self._sync = False              # True while the code itself moves the trackbars
+        self.image_h = 0                # height of the image part of the window (panel below it)
 
     # ---- slider <-> value mapping (log scale for exposure) ----
     def _exp_hi(self):
@@ -349,12 +364,12 @@ class Preview:
 
     def _sync_trackbars(self):
         self._sync = True
-        cv2.setTrackbarPos('exposure (log)', WIN, self.exp_to_slider(self.cam.get_exposure_us()))
-        cv2.setTrackbarPos('gain', WIN, self.gain_to_slider(self.cam.get_gain()))
+        cv2.setTrackbarPos(TB_EXP, WIN, self.exp_to_slider(self.cam.get_exposure_us()))
+        cv2.setTrackbarPos(TB_GAIN, WIN, self.gain_to_slider(self.cam.get_gain()))
         self._sync = False
 
     def _on_mouse(self, event, x, y, flags, _):
-        if event == cv2.EVENT_LBUTTONDOWN and not self.zoom:
+        if event == cv2.EVENT_LBUTTONDOWN and not self.zoom and y < self.image_h:
             self.roi_center = (int(x / self.scale), int(y / self.scale))
             self.peak = 0.0
 
@@ -382,12 +397,13 @@ class Preview:
         return img
 
     @staticmethod
-    def _text(img, lines, origin=(10, 25)):
+    def _text(img, lines, origin=(10, 22)):
+        """Draw lines of plain text; a line can be a str or a (str, color) tuple."""
         x, y = origin
         for line in lines:
-            cv2.putText(img, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
-            cv2.putText(img, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1, cv2.LINE_AA)
-            y += 24
+            text, color = line if isinstance(line, tuple) else (line, TEXT)
+            cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+            y += LINE_H
 
     def settings_text(self):
         return (f'  exposure: {self.cam.get_exposure_us():.0f}    # us\n'
@@ -404,8 +420,8 @@ class Preview:
 
     def run(self):
         cv2.namedWindow(WIN, cv2.WINDOW_AUTOSIZE)
-        cv2.createTrackbar('exposure (log)', WIN, 0, EXP_SLIDER_MAX, self._on_exp)
-        cv2.createTrackbar('gain', WIN, 0, GAIN_SLIDER_MAX, self._on_gain)
+        cv2.createTrackbar(TB_EXP, WIN, 0, EXP_SLIDER_MAX, self._on_exp)
+        cv2.createTrackbar(TB_GAIN, WIN, 0, GAIN_SLIDER_MAX, self._on_gain)
         cv2.setMouseCallback(WIN, self._on_mouse)
         self._sync_trackbars()
 
@@ -420,7 +436,7 @@ class Preview:
                 bgr = to_bgr(raw, self.cam.pixel_format)
                 self.render(bgr)
             elif raw is None:
-                waiting = np.zeros((200, 600, 3), np.uint8)
+                waiting = np.full((200, 700, 3), PANEL_BG, np.uint8)
                 lines = ['waiting for frames...']
                 counts = getattr(self.cam, 'status_counts', None)
                 if counts is not None:
@@ -480,24 +496,35 @@ class Preview:
             s = self.scale
             cv2.rectangle(view, (int(x0 * s), int(y0 * s)), (int(x1 * s), int(y1 * s)), (0, 255, 0), 2)
 
-        # focus bar relative to peak
+        # info panel below the image, so nothing is drawn over the picture
         ratio = focus / self.peak if self.peak > 0 else 0
-        bar_w = int((view.shape[1] - 20) * ratio)
-        cv2.rectangle(view, (10, view.shape[0] - 25), (10 + bar_w, view.shape[0] - 10),
-                      (0, 255, 0) if ratio > 0.95 else (0, 165, 255), -1)
+        vw = max(view.shape[1], 700)
+        hist_w, hist_h = 256, 100
+        lines = [
+            f'Exposure: {self.cam.get_exposure_us():.0f} us      Gain: {self.cam.get_gain():.1f} {self.cam.gain_unit}',
+            f'Focus: {focus:.1f}    peak {self.peak:.1f}  ({100 * ratio:.0f}%)',
+            f'Saturated: frame {sat_all:.2f}%   ROI {sat_roi:.2f}%   max {int(gray.max())}',
+            (f'{self.fps:.1f} fps   {w}x{h}   {"ZOOM 1:1" if self.zoom else ""}', TEXT_DIM),
+            ('z zoom   click: move ROI   r reset peak   [ ] exposure   - = gain   s save   p print   q quit', TEXT_DIM),
+        ]
+        panel_h = max(len(lines) * LINE_H + 30, hist_h + 20)
+        panel = np.full((panel_h, vw, 3), PANEL_BG, np.uint8)
+        self._text(panel, lines)
 
-        self._text(view, [
-            f'exp {self.cam.get_exposure_us():.0f} us   gain {self.cam.get_gain():.1f} {self.cam.gain_unit}   '
-            f'{self.fps:.1f} fps   {w}x{h}',
-            f'focus {focus:.1f}   peak {self.peak:.1f}   ({100 * ratio:.0f}%)',
-            f'saturated: frame {sat_all:.2f}%   roi {sat_roi:.2f}%   max {int(gray.max())}',
-            'z zoom  click ROI  r reset peak  [ ] exp  - = gain  s save  p print  q quit',
-        ])
+        # focus bar (relative to the peak) under the text
+        bar_x1 = vw - hist_w - 30
+        bar_y = len(lines) * LINE_H + 8
+        cv2.rectangle(panel, (10, bar_y), (bar_x1, bar_y + 12), (80, 80, 80), -1)
+        cv2.rectangle(panel, (10, bar_y), (10 + int((bar_x1 - 10) * ratio), bar_y + 12),
+                      (0, 200, 0) if ratio > 0.95 else (0, 140, 255), -1)
 
-        hist = self._histogram(cv2.resize(gray, (w // 8, h // 8), interpolation=cv2.INTER_NEAREST))
-        hh, hw = hist.shape[:2]
-        if view.shape[0] > hh + 140 and view.shape[1] > hw + 20:
-            view[view.shape[0] - hh - 35:view.shape[0] - 35, view.shape[1] - hw - 10:view.shape[1] - 10] = hist
+        hist = self._histogram(cv2.resize(gray, (w // 8, h // 8), interpolation=cv2.INTER_NEAREST), hist_w, hist_h)
+        panel[10:10 + hist_h, vw - hist_w - 10:vw - 10] = hist
+
+        if view.shape[1] < vw:
+            view = cv2.copyMakeBorder(view, 0, 0, 0, vw - view.shape[1], cv2.BORDER_CONSTANT, value=PANEL_BG)
+        self.image_h = view.shape[0]
+        view = np.vstack([view, panel])
 
         cv2.imshow(WIN, view)
 

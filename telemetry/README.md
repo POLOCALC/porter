@@ -12,7 +12,7 @@ The ground links of PORTER: the daemon that owns the payload's XBee radio (`tele
 | `command_server.py` | Pi, inside `control.py` | Unix socket `/tmp/porter_cmd.sock` that relays camera/gimbal commands from telemd to porter's threads. |
 | `StatusBoard.py` | Pi, inside `control.py` | Thread-safe sensor health board (heartbeats, `ok`/`stale`/`dead`, error reasons). |
 | `alvium_capture.py` | Pi, run by telemd | Captures one Alvium frame for `camera.capture`. |
-| `default.yml` | — | Not read by any code (`control.py` uses `config/default.yml`). Kept as an example: it has the LM76 sensor enabled. |
+| `default.yml` | — | Not read by any code (`control.py` reads its configuration from `config/`). An old example with the LM76 sensor enabled; the `source` block uses the old Valon-only format. |
 
 ## telemd
 
@@ -61,11 +61,11 @@ Commands are typed in the ground station. Replies start with `ACK:` or `ERR:` un
 | Command | What it does | Reply |
 |---|---|---|
 | `ping` | Link check. | `pong - uplink RSSI: <dBm> dBm` |
-| `start` | Starts porter with `config/default.yml` (`porter@default.service`). | `ACK:start queued`, then `ACK:porter_start <unit>` or `ERR:...` |
-| `start <name>` | Starts porter with `config/<name>.yml`, e.g. `start test_configs/starspec`. The name may contain letters, digits, `_`, `-` and `/`. The file must exist. | as above |
+| `start` | Starts porter with `config/default.yml` (`porter@default.service`). In the repository it's a copy of `90GHz_M400.yml`. | `ACK:start queued`, then `ACK:porter_start <unit>` or `ERR:...` |
+| `start <name>` | Starts porter with `config/<name>.yml`, e.g. `start 90GHz_M400` or `start test_configs/starspec`. The name may contain letters, digits, `_`, `-` and `/`. The file must exist. | as above |
 | `stop` | Stops porter cleanly (`systemctl stop 'porter@*'`, up to 20 s). | `ACK:stop queued`, then `ACK:porter_stop` |
 | `getlog` | Sends the last 40 KiB of `flight.log`. | `LOGDATA:<base64>`, saved as `flight.log` on the ground |
-| `setconfig <local path>` | Uploads a YAML file to replace `config/default.yml`. Rejected if the data isn't valid base64 or valid YAML (a mapping). The previous file is kept as `config/default.yml.bak`. Used at the next `start`. | `ACK:setconfig (<n> bytes written, ...)` |
+| `setconfig <local path>` | Uploads a YAML file to replace `config/default.yml`. Rejected if the data isn't valid base64 or valid YAML (a mapping). The previous file is kept as `config/default.yml.bak`. Used at the next plain `start`. | `ACK:setconfig (<n> bytes written, ...)` |
 | `camera.start` | Starts the Alvium camera thread, if it isn't already running (for `autostart_camera: False`). | `ACK:camera.start` |
 | `camera.capture [-e <µs>] [-g <dB>]` | Captures one Alvium frame (defaults: exposure 10000, gain 30). Slow: the image travels over the radio. | `ACK:... capturing...`, then `IMGDATA:<base64>`, saved as `captured_frame.jpg` on the ground |
 | `gimbal.goto <yaw> <pitch> <roll>` | Moves the gimbal (degrees). Needs the pointing controller. | `ACK:`/`ERR:` |

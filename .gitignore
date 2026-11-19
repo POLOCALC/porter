@@ -9,3 +9,6 @@ plot_venv/
 venv/
 requirements.txt
 data/
+
+# Vimba X SDK installer (Allied Vision licence, 74 MB): not committed, copy it into modules/ by hand
+modules/VimbaX_Setup-*.tar.gz

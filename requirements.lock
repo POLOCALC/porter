@@ -1,0 +1,58 @@
+# PORTER Python packages, pinned: install_porter.sh installs exactly these into the porter venv.
+# Taken on 2026-11-16 from `pip freeze` of the working flight Pi (Raspberry Pi 5, Raspberry Pi OS trixie,
+# Python 3.13), restricted to what porter and its local modules (lager, sour_core, pyalvium, pyalvium_csi)
+# need, with all their dependencies. The local modules and vmbpy are installed separately by the installer.
+#
+# Change a version only on purpose, after testing it on the Pi, then regenerate the whole list.
+# Notes:
+# - Adafruit-Blinka is kept at 9.x: 10.x needs the gpiod bindings and is not tested on the payload yet.
+# - lgpio: Blinka 9.x drives the Pi 5 GPIO through it but doesn't declare it. Built from source
+#   (needs swig and liblgpio-dev, installed by the apt step of install_porter.sh), like PyYAML and RPi.GPIO.
+# - six: needed by python-dateutil; not in the freeze (it comes from the OS there), pinned to Debian trixie's version.
+Adafruit-Blinka==9.1.0
+adafruit-circuitpython-busdevice==5.2.17
+adafruit-circuitpython-connectionmanager==3.1.8
+adafruit-circuitpython-ina228==2.0.5
+adafruit-circuitpython-mcp4725==1.4.21
+adafruit-circuitpython-register==1.11.3
+adafruit-circuitpython-requests==4.1.17
+adafruit-circuitpython-typing==1.12.3
+Adafruit-PlatformDetect==3.89.1
+Adafruit-PureIO==1.1.11
+binho-host-adapter==0.1.6
+contourpy==1.3.1
+cycler==0.12.1
+digi-xbee==1.5.0
+fastcrc==0.3.6
+fonttools==4.57.0
+kiwisolver==1.4.7
+lgpio==0.2.2.0
+lxml==5.4.0
+markdown-it-py==3.0.0
+matplotlib==3.10.8
+mdurl==0.1.2
+mpl_ascii==1.0.1
+numpy==2.2.4
+opencv-python==5.0.0.93
+packaging==25.0
+pandas==3.0.0
+pillow==11.1.0
+psutil==7.0.0
+pyftdi==0.57.2
+Pygments==2.18.0
+pymap3d==3.2.0
+pymavlink==2.4.49
+pynmeagps==1.1.5
+pyparsing==3.1.2
+pyrtcm==1.1.12
+pyserial==3.5
+python-dateutil==2.9.0
+pyubx2==1.3.4
+pyusb==1.3.1
+PyYAML==6.0.1
+rich==13.7.1
+RPi.GPIO==0.7.1
+scipy==1.15.3
+six==1.17.0
+sysv_ipc==1.2.0
+typing_extensions==4.13.2

@@ -157,7 +157,7 @@ BASHRC="/home/polocalc/.bashrc"
 if ! grep -qs "Project PATH additions" "$BASHRC"; then
     cat >> "$BASHRC" <<'EOF'
     # --- Project PATH additions ---
-    alias vimbax='/opt/VimbaX_2026-1/bin/VimbaXViewer'
+    alias vimbax='/opt/VimbaX_2026-3/bin/VimbaXViewer'
     export PATH="$HOME/.local/bin:$PATH"
 EOF
 fi
