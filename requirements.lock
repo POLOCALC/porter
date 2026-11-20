@@ -7,7 +7,7 @@
 # Notes:
 # - Adafruit-Blinka is kept at 9.x: 10.x needs the gpiod bindings and is not tested on the payload yet.
 # - lgpio: Blinka 9.x drives the Pi 5 GPIO through it but doesn't declare it. Built from source
-#   (needs swig and liblgpio-dev, installed by the apt step of install_porter.sh), like PyYAML and RPi.GPIO.
+#   (with its bundled C library, PYPI=1 in install_porter.sh; needs swig from the apt step), like PyYAML and RPi.GPIO.
 # - six: needed by python-dateutil; not in the freeze (it comes from the OS there), pinned to Debian trixie's version.
 Adafruit-Blinka==9.1.0
 adafruit-circuitpython-busdevice==5.2.17

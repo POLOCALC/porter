@@ -75,7 +75,8 @@ if ! python3 -m venv --help > /dev/null 2>&1; then
 fi
 
 # build prerequisites for Python packages without a prebuilt wheel for this Pi
-step "build prerequisites (apt)" sudo apt install -y python3-dev build-essential pkg-config libffi-dev swig liblgpio-dev
+# (no liblgpio-dev: lgpio is built with its bundled C library, see PYPI=1 below)
+step "build prerequisites (apt)" sudo apt install -y python3-dev build-essential pkg-config libffi-dev swig
 
 # Rust toolchain: needed by build_for_pi.sh (ADS1015, Inertial, LM76)
 if ! command -v cargo > /dev/null 2>&1 && [ -x "$HOME/.cargo/bin/cargo" ]; then
@@ -110,7 +111,9 @@ echo "[3/5] Installing Python packages..."
 
 # every package at the exact version of the working flight Pi (requirements.lock), so that a new release on
 # PyPI can't break a fresh install (e.g. Adafruit-Blinka 10, which needs gpiod)
-step "pinned packages (requirements.lock)" "$PIP" install -r "$REPO_DIR/requirements.lock"
+# PYPI=1: lgpio's setup.py then compiles its bundled C library into the module (static) instead of linking
+# the system liblgpio, so the apt package liblgpio-dev isn't needed (not always available in apt)
+step "pinned packages (requirements.lock)" env PYPI=1 "$PIP" install -r "$REPO_DIR/requirements.lock"
 step "VmbPy"         "$PIP" install --no-deps "$REPO_DIR/modules/vmbpy-1.2.1-py3-none-any.whl"
 # local modules with --no-deps: their dependencies are already in requirements.lock
 step "Pyalvium"      "$PIP" install --no-deps -e "$REPO_DIR/modules/Alvium-Camera-Module-Python"
